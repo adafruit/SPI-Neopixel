@@ -16,31 +16,31 @@
 #define IN_CLK_PORTx	PORTB
 #define IN_CLK_DDRx		DDRB
 #define IN_CLK_PINx		PINB
-#define IN_CLK_MASK		_BV(2)
+#define IN_CLK_MASK		(1 << 2)
 #define IN_DATA_PORTx	PORTB
 #define IN_DATA_DDRx	DDRB
 #define IN_DATA_PINx	PINB
-#define IN_DATA_MASK	_BV(0)
+#define IN_DATA_MASK	(1 << 0)
 
 // output
 #define OUT_PORTx		PORTB
 #define OUT_DDRx		DDRB
 #define OUT_PINx		PINB
-#define OUT_MASK		_BV(1)
+#define OUT_MASK		(1 << 1)
 
 // mode select jumper
 #define JMP_SPEED_PORTx		PORTB
 #define JMP_SPEED_DDRx		DDRB
 #define JMP_SPEED_PINx		PINB
-#define JMP_SPEED_MASK		_BV(2)
+#define JMP_SPEED_MASK		(1 << 2)
 #define IS_NEO_KHZ800()		((PINB & JMP_SPEED_MASK) != 0)
 
 // hardware register selection
 #define TIMEOUT_TCCRnB			TCCR1
-#define TIMEOUT_OCRnx			OCR1C
+#define TIMEOUT_OCRnx			OCR1A
 #define TIMEOUT_TCNTn			TCNT1
 #define TIMEOUT_CTCn			CTC1
-#define TIMEOUT_OVF_FLAGBIT		TOV1
+#define TIMEOUT_OVF_FLAGBIT		OCF1A
 #define TIMEOUT_TIFR			TIFR
 
 #if (INPUT_MODE == INPUT_MODE_I2C)
@@ -88,8 +88,8 @@
 #define RESET_TIMEOUT_TIMER() do { TIMEOUT_TCNTn = 0; TIMEOUT_TIFR |= _BV(TIMEOUT_OVF_FLAGBIT); } while (0)
 
 // global vars
-#define BUFFER_SIZE		(RAMEND - (32 * 5)) // if the buffer is too big then we might get a stack collision
-static volatile uint8_t buffer[BUFFER_SIZE];
+#define BUFFER_SIZE		(RAMEND - (32 * 6)) // if the buffer is too big then we might get a stack collision
+static volatile uint8_t buffer[BUFFER_SIZE + 1];
 static volatile uint16_t buffer_idx = 0;
 
 // func prototype
@@ -110,12 +110,21 @@ int main(void)
 	// default low
 	OUT_PORTx &= ~OUT_MASK;
 	
+	/*
+	// test sequence
 	for (volatile unsigned char i = 0xFF; i; i--) asm volatile ("\tnop\r\n"); // delay
+	buffer[0] = 0;
+	buffer[1] = 0xFF;
+	buffer[2] = 0x55;
+	buffer_idx = 3;
+	send_to_neopixel();
+	buffer_idx = 0;
+	//*/
 	
 	// setup timer to gauge timeout (blank time of 500uS means end of frame)
-	TIMEOUT_TCCRnB = _BV(CTC1) | 0x03; // CTC mode, clk/64
+	TIMEOUT_TCCRnB = _BV(CTC1) | 0x0A; // CTC mode, clk/32
 	TIMEOUT_OCRnx = 125; // this is about 500uS
-	
+
 	while (1)
 	{
 		#if (INPUT_MODE == INPUT_MODE_SPI)
@@ -138,9 +147,9 @@ int main(void)
 		#else
 		#error Input Mode Unknown
 		#endif
-		
+
 		RESET_TIMEOUT_TIMER();
-		
+
 		while (1)
 		{
 			if (bit_is_set(TIMEOUT_TIFR, TIMEOUT_OVF_FLAGBIT)) // timeout waiting for data
@@ -164,9 +173,10 @@ int main(void)
 			else if (bit_is_set(USISR, USIOIF)) // new data arrived
 			{
 				RESET_TIMEOUT_TIMER();
-				buffer[buffer_idx] = USIBR; // take input
+				buffer[buffer_idx] = USIDR; // take input
 				buffer_idx = buffer_idx < (BUFFER_SIZE - 1) ? (buffer_idx + 1) : (BUFFER_SIZE - 1); // increment index without overflow
 				USIDR = 0; // make sure we don't accidentally send stuff to neopixel
+				USISR |= _BV(USIOIF); // clear the flag
 			}
 			else if (buffer_idx <= 0 && (USISR & 0x0F) == 0)
 			{
@@ -244,14 +254,14 @@ static void send_to_neopixel(void)
 		// relative branch.
 
 		asm volatile(
-			"headD:\n\t"         // Clk  Pseudocode
+			"headD:\n\t"        // Clk  Pseudocode
 			// Bit 7:
 			"out  %0, %1\n\t"   // 1    PORT = hi
 			"mov  %3, %4\n\t"   // 1    n2   = lo
 			"out  %0, %2\n\t"   // 1    PORT = n1
 			"rjmp .+0\n\t"      // 2    nop nop
 			"sbrc %5, 6\n\t"    // 1-2  if(b & 0x40)
-			"mov %3, %1\n\t"   // 0-1    n2 = hi
+			"mov  %3, %1\n\t"   // 0-1    n2 = hi
 			"out  %0, %4\n\t"   // 1    PORT = lo
 			"rjmp .+0\n\t"      // 2    nop nop
 			// Bit 6:
@@ -260,7 +270,7 @@ static void send_to_neopixel(void)
 			"out  %0, %3\n\t"   // 1    PORT = n2
 			"rjmp .+0\n\t"      // 2    nop nop
 			"sbrc %5, 5\n\t"    // 1-2  if(b & 0x20)
-			"mov %2, %1\n\t"   // 0-1    n1 = hi
+			"mov  %2, %1\n\t"   // 0-1    n1 = hi
 			"out  %0, %4\n\t"   // 1    PORT = lo
 			"rjmp .+0\n\t"      // 2    nop nop
 			// Bit 5:
@@ -269,7 +279,7 @@ static void send_to_neopixel(void)
 			"out  %0, %2\n\t"   // 1    PORT = n1
 			"rjmp .+0\n\t"      // 2    nop nop
 			"sbrc %5, 4\n\t"    // 1-2  if(b & 0x10)
-			"mov %3, %1\n\t"   // 0-1    n2 = hi
+			"mov  %3, %1\n\t"   // 0-1    n2 = hi
 			"out  %0, %4\n\t"   // 1    PORT = lo
 			"rjmp .+0\n\t"      // 2    nop nop
 			// Bit 4:
@@ -278,7 +288,7 @@ static void send_to_neopixel(void)
 			"out  %0, %3\n\t"   // 1    PORT = n2
 			"rjmp .+0\n\t"      // 2    nop nop
 			"sbrc %5, 3\n\t"    // 1-2  if(b & 0x08)
-			"mov %2, %1\n\t"   // 0-1    n1 = hi
+			"mov  %2, %1\n\t"   // 0-1    n1 = hi
 			"out  %0, %4\n\t"   // 1    PORT = lo
 			"rjmp .+0\n\t"      // 2    nop nop
 			// Bit 3:
@@ -287,7 +297,7 @@ static void send_to_neopixel(void)
 			"out  %0, %2\n\t"   // 1    PORT = n1
 			"rjmp .+0\n\t"      // 2    nop nop
 			"sbrc %5, 2\n\t"    // 1-2  if(b & 0x04)
-			"mov %3, %1\n\t"   // 0-1    n2 = hi
+			"mov  %3, %1\n\t"   // 0-1    n2 = hi
 			"out  %0, %4\n\t"   // 1    PORT = lo
 			"rjmp .+0\n\t"      // 2    nop nop
 			// Bit 2:
@@ -296,7 +306,7 @@ static void send_to_neopixel(void)
 			"out  %0, %3\n\t"   // 1    PORT = n2
 			"rjmp .+0\n\t"      // 2    nop nop
 			"sbrc %5, 1\n\t"    // 1-2  if(b & 0x02)
-			"mov %2, %1\n\t"   // 0-1    n1 = hi
+			"mov  %2, %1\n\t"   // 0-1    n1 = hi
 			"out  %0, %4\n\t"   // 1    PORT = lo
 			"rjmp .+0\n\t"      // 2    nop nop
 			// Bit 1:
@@ -305,7 +315,7 @@ static void send_to_neopixel(void)
 			"out  %0, %2\n\t"   // 1    PORT = n1
 			"rjmp .+0\n\t"      // 2    nop nop
 			"sbrc %5, 0\n\t"    // 1-2  if(b & 0x01)
-			"mov %3, %1\n\t"   // 0-1    n2 = hi
+			"mov  %3, %1\n\t"   // 0-1    n2 = hi
 			"out  %0, %4\n\t"   // 1    PORT = lo
 			"sbiw %6, 1\n\t"    // 2    i--  (dec. but don't act on zero flag yet)
 			// Bit 0:
@@ -314,18 +324,18 @@ static void send_to_neopixel(void)
 			"out  %0, %3\n\t"   // 1    PORT = n2
 			"ld   %5, %a7+\n\t" // 2    b = *ptr++
 			"sbrc %5, 7\n\t"    // 1-2  if(b & 0x80)
-			"mov %2, %1\n\t"   // 0-1    n1 = hi
+			"mov  %2, %1\n\t"   // 0-1    n1 = hi
 			"out  %0, %4\n\t"   // 1    PORT = lo
 			"brne headD\n"      // 2    while(i) (zero flag determined above)
 		::
 			"I" (_SFR_IO_ADDR(OUT_PORTx)), // %0
-			"r" (hi),                  // %1
-			"r" (n1),                  // %2
-			"r" (n2),                  // %3
-			"r" (lo),                  // %4
-			"r" (b),                   // %5
-			"w" (i),                   // %6
-			"e" (ptr)                  // %a7
+			"r" (hi),                      // %1
+			"r" (n1),                      // %2
+			"r" (n2),                      // %3
+			"r" (lo),                      // %4
+			"r" (b),                       // %5
+			"w" (i),                       // %6
+			"e" (ptr)                      // %a7
 		); // end asm
 	}
 	else
