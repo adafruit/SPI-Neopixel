@@ -110,20 +110,26 @@ int main(void)
 	// default low
 	OUT_PORTx &= ~OUT_MASK;
 	
+	// setup timer to gauge timeout (blank time of 500uS means end of frame)
+	TIMEOUT_TCCRnB = _BV(CTC1) | 0x06; // CTC mode
+	TIMEOUT_OCRnx = 125; // this is about 500uS
+
 	/*
 	// test sequence
 	for (volatile unsigned char i = 0xFF; i; i--) asm volatile ("\tnop\r\n"); // delay
 	buffer[0] = 0;
 	buffer[1] = 0xFF;
 	buffer[2] = 0x55;
+	for (buffer_idx = 0; buffer_idx < 6; buffer_idx++)
+	{
+		while (bit_is_clear(TIMEOUT_TIFR, TIMEOUT_OVF_FLAGBIT));
+		TIMEOUT_TIFR |= _BV(TIMEOUT_OVF_FLAGBIT);
+		OUT_PORTx ^= OUT_MASK;
+	}
 	buffer_idx = 3;
 	send_to_neopixel();
 	buffer_idx = 0;
 	//*/
-	
-	// setup timer to gauge timeout (blank time of 500uS means end of frame)
-	TIMEOUT_TCCRnB = _BV(CTC1) | 0x0A; // CTC mode, clk/32
-	TIMEOUT_OCRnx = 125; // this is about 500uS
 
 	while (1)
 	{
@@ -135,6 +141,7 @@ int main(void)
 		USICR  =  0;									// Disable USI, will be enabled by PCINT
 		GIFR   =  (1<<PCIF);							// Clear pin change interrupt flag
 		GIMSK |=  (1<<PCIE);							// Enable pin change interrupt
+		PCMSK |=  (1<<PCINT0);							// Use DI pin
 		sei();
 		#elif (INPUT_MODE == INPUT_MODE_I2C)
 		USICR =	(1<<USISIE)|(0<<USIOIE)|				// Enable Start Condition Interrupt. Disable Overflow Interrupt.
