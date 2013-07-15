@@ -8,7 +8,7 @@ CC = avr-gcc
 CCXX = avr-g++
 
 ## Project specific options here
-INPUT_MODE = 1
+INPUT_MODE = 2
 BAUDRATE = 38400
 I2C_ADDR = 0xAA
 

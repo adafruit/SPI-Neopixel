@@ -4,6 +4,8 @@
 
 #include <avr/io.h>
 #include <avr/interrupt.h>
+#include <util/twi.h>
+#include <stdlib.h>
 
 // input mode selection, pick one using compiler options
 #define INPUT_MODE_SPI		0
@@ -26,13 +28,13 @@
 #define OUT_PORTx		PORTB
 #define OUT_DDRx		DDRB
 #define OUT_PINx		PINB
-#define OUT_MASK		(1 << 1)
+#define OUT_MASK		(1 << 4)
 
 // mode select jumper
 #define JMP_SPEED_PORTx		PORTB
 #define JMP_SPEED_DDRx		DDRB
 #define JMP_SPEED_PINx		PINB
-#define JMP_SPEED_MASK		(1 << 2)
+#define JMP_SPEED_MASK		(1 << 3)
 #define IS_NEO_KHZ800()		((PINB & JMP_SPEED_MASK) != 0)
 
 // hardware register selection
@@ -88,8 +90,8 @@
 #define RESET_TIMEOUT_TIMER() do { TIMEOUT_TCNTn = 0; TIMEOUT_TIFR |= _BV(TIMEOUT_OVF_FLAGBIT); } while (0)
 
 // global vars
-#define BUFFER_SIZE		(RAMEND - (32 * 6)) // if the buffer is too big then we might get a stack collision
-static volatile uint8_t buffer[BUFFER_SIZE + 1];
+#define BUFFER_SIZE		((RAMEND - RAMSTART) - (32 * 3)) // if the buffer is too big then we might get a stack collision
+static volatile uint8_t* buffer;
 static volatile uint16_t buffer_idx = 0;
 
 // func prototype
@@ -97,6 +99,8 @@ static void send_to_neopixel(void);
 
 int main(void)
 {
+	buffer = (uint8_t*)malloc(BUFFER_SIZE + 1);
+
 	// setup pin directions
 	IN_CLK_DDRx &= ~IN_CLK_MASK;
 	IN_DATA_DDRx &= ~IN_DATA_MASK;
@@ -114,23 +118,6 @@ int main(void)
 	TIMEOUT_TCCRnB = _BV(CTC1) | 0x06; // CTC mode
 	TIMEOUT_OCRnx = 125; // this is about 500uS
 
-	/*
-	// test sequence
-	for (volatile unsigned char i = 0xFF; i; i--) asm volatile ("\tnop\r\n"); // delay
-	buffer[0] = 0;
-	buffer[1] = 0xFF;
-	buffer[2] = 0x55;
-	for (buffer_idx = 0; buffer_idx < 6; buffer_idx++)
-	{
-		while (bit_is_clear(TIMEOUT_TIFR, TIMEOUT_OVF_FLAGBIT));
-		TIMEOUT_TIFR |= _BV(TIMEOUT_OVF_FLAGBIT);
-		OUT_PORTx ^= OUT_MASK;
-	}
-	buffer_idx = 3;
-	send_to_neopixel();
-	buffer_idx = 0;
-	//*/
-
 	while (1)
 	{
 		#if (INPUT_MODE == INPUT_MODE_SPI)
@@ -145,11 +132,13 @@ int main(void)
 		sei();
 		#elif (INPUT_MODE == INPUT_MODE_I2C)
 		USICR =	(1<<USISIE)|(0<<USIOIE)|				// Enable Start Condition Interrupt. Disable Overflow Interrupt.
-				(1<<USIWM1)|(0<<USIWM0)|				// Set USI in Two-wire mode. No USI Counter overflow prior
+				(1<<USIWM1)|(1<<USIWM0)|				// Set USI in Two-wire mode. No USI Counter overflow prior
 														// to first Start Condition (potentail failure)
 				(1<<USICS1)|(0<<USICS0)|(0<<USICLK)|	// Shift Register Clock Source = External, positive edge
 				(0<<USITC);
 		USISR = 0xF0;									// Clear all flags and reset overflow counter
+		IN_CLK_DDRx &= ~IN_CLK_MASK;
+		IN_DATA_DDRx &= ~IN_DATA_MASK;
 		sei();
 		#else
 		#error Input Mode Unknown
@@ -204,13 +193,16 @@ int main(void)
 static void send_to_neopixel(void)
 {
 	cli(); // timing critical code below, no interrupts allowed
+	// setup jumper detection
+	JMP_SPEED_DDRx &= ~JMP_SPEED_MASK;
+	JMP_SPEED_PORTx |= JMP_SPEED_MASK;
 
 	// code below is copied from Adafruit_NeoPixel.cpp, git hash a494d8992d18d10a3f4b90e92b966aaf1cb2272b
 
 	volatile uint16_t i = buffer_idx; // Loop counter
 	volatile uint8_t next, bit;
 	volatile uint8_t
-	*ptr = buffer,		// Pointer to next byte
+	*ptr = &buffer[0],		// Pointer to next byte
 	b	= *ptr++,		// Current byte value
 	hi,					// PORT w/output bit set high
 	lo; 
@@ -715,15 +707,15 @@ ISR (PCINT0_vect)
         USIDR    =  0;                                              /* Prepare ACK                         */ \
         IN_DATA_DDRx |=  IN_DATA_MASK;                              /* Set SDA as output                   */ \
         USISR    =  (0<<USISIF)|(1<<USIOIF)|(1<<USIPF)|(1<<USIDC)|  /* Clear all flags, except Start Cond  */ \
-                    (0x0E<<USICNT0);                                /* set USI counter to shift 1 bit. */ \
+                    (0x0E<<USICNT0);                                /* set USI counter to shift 1 bit.     */ \
 }
 
 #define SET_USI_TO_READ_ACK()                                                                                 \
 {                                                                                                             \
-        IN_DATA_DDRx &= ~IN_DATA_MASK;                             /* Set SDA as intput */                   \
+        IN_DATA_DDRx &= ~IN_DATA_MASK;                              /* Set SDA as intput  */                  \
         USIDR    =  0;                                              /* Prepare ACK        */                  \
         USISR    =  (0<<USISIF)|(1<<USIOIF)|(1<<USIPF)|(1<<USIDC)|  /* Clear all flags, except Start Cond  */ \
-                    (0x0E<<USICNT0);                                /* set USI counter to shift 1 bit. */ \
+                    (0x0E<<USICNT0);                                /* set USI counter to shift 1 bit.     */ \
 }
 
 #define SET_USI_TO_TWI_START_CONDITION_MODE()                                                                                     \
@@ -732,7 +724,7 @@ ISR (PCINT0_vect)
               (1<<USIWM1)|(0<<USIWM0)|                        /* Set USI in Two-wire mode. No USI Counter overflow hold.      */  \
               (1<<USICS1)|(0<<USICS0)|(0<<USICLK)|            /* Shift Register Clock Source = External, positive edge        */  \
               (0<<USITC);                                                                                                         \
-  USISR    =  (0<<USISIF)|(1<<USIOIF)|(1<<USIPF)|(1<<USIDC)|  /* Clear all flags, except Start Cond                            */ \
+  USISR    =  (0<<USISIF)|(1<<USIOIF)|(1<<USIPF)|(1<<USIDC)|  /* Clear all flags, except Start Cond                           */  \
               (0x0<<USICNT0);                                                                                                     \
 }
 
@@ -747,7 +739,7 @@ ISR (PCINT0_vect)
 {                                                                                                            \
     IN_DATA_DDRx &= ~IN_DATA_MASK;                                  /* Set SDA as input                   */ \
     USISR    =  (0<<USISIF)|(1<<USIOIF)|(1<<USIPF)|(1<<USIDC)|      /* Clear all flags, except Start Cond */ \
-                (0x0<<USICNT0);                                     /* set USI to shift out 8 bits        */ \
+                (0x0<<USICNT0);                                     /* set USI to shift in 8 bits         */ \
 }
 
 ISR (
@@ -766,14 +758,14 @@ ISR (
 	tmpUSISR = USISR;												// Not necessary, but prevents warnings
 	// Set default starting conditions for new TWI package
 	USI_TWI_Overflow_State = USI_SLAVE_CHECK_ADDRESS;
-	IN_DATA_DDRx  &= ~IN_DATA_MASK;                                 // Set SDA as input
+	IN_DATA_DDRx  &= ~IN_DATA_MASK;											// Set SDA as input
 	while ( (IN_DATA_PINx & IN_DATA_MASK) & !(tmpUSISR & (1<<USIPF)) );		// Wait for SCL to go low to ensure the "Start Condition" has completed.
 																			// If a Stop condition arises then leave the interrupt to prevent waiting forever.
-	USICR =		(1<<USISIE)|(1<<USIOIE)|                            // Enable Overflow and Start Condition Interrupt. (Keep StartCondInt to detect RESTART)
-				(1<<USIWM1)|(1<<USIWM0)|                            // Set USI in Two-wire mode.
-				(1<<USICS1)|(0<<USICS0)|(0<<USICLK)|                // Shift Register Clock Source = External, positive edge
+	USICR =		(1<<USISIE)|(1<<USIOIE)|									// Enable Overflow and Start Condition Interrupt. (Keep StartCondInt to detect RESTART)
+				(1<<USIWM1)|(1<<USIWM0)|									// Set USI in Two-wire mode.
+				(1<<USICS1)|(0<<USICS0)|(0<<USICLK)|						// Shift Register Clock Source = External, positive edge
 				(0<<USITC);
-	USISR =		(1<<USISIF)|(1<<USIOIF)|(1<<USIPF)|(1<<USIDC)|// Clear flags
+	USISR =		(1<<USISIF)|(1<<USIOIF)|(1<<USIPF)|(1<<USIDC)|				// Clear flags
 				(0x0<<USICNT0);
 	RESET_TIMEOUT_TIMER();
 }
@@ -788,6 +780,8 @@ ISR (
 	#endif
 	)
 {
+	IN_CLK_DDRx |= IN_CLK_MASK; // clock stretch
+
 	unsigned char tmpUSIDR;
 
 	RESET_TIMEOUT_TIMER();
@@ -798,9 +792,9 @@ ISR (
 		// Check address and send ACK (and next USI_SLAVE_SEND_DATA) if OK, else reset USI.
 		case USI_SLAVE_CHECK_ADDRESS:
 			tmpUSIDR = USIDR;
-			if ((tmpUSIDR == 0) || (( tmpUSIDR>>1 ) == (tmpUSIDR>>1)))
+			if ((tmpUSIDR == 0) || (( tmpUSIDR>>1 ) == (I2C_ADDR>>1)))
 			{
-				if ( tmpUSIDR & 0x01 )
+				if ( tmpUSIDR & TW_READ )
 					USI_TWI_Overflow_State = USI_SLAVE_SEND_DATA;
 				else
 					USI_TWI_Overflow_State = USI_SLAVE_REQUEST_DATA;
@@ -855,6 +849,9 @@ ISR (
 			SET_USI_TO_SEND_ACK();
 		break;
 	}
+
+	USISR |= _BV(USIOIF); // clear the flag
+	IN_CLK_DDRx &= ~IN_CLK_MASK; // release clock
 }
 
 #endif
