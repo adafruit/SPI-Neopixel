@@ -7,10 +7,13 @@
 #include <util/twi.h>
 #include <stdlib.h>
 
-// input mode selection, pick one using compiler options
-#define INPUT_MODE_SPI		0
-#define INPUT_MODE_UART		1
-#define INPUT_MODE_I2C		2
+typedef enum {
+	INPUTMODE_SPI = 0,
+	INPUTMODE_UART = 1,
+	INPUTMODE_I2C_0XAA = 2,
+	INPUTMODE_I2C_0XCC = 3,
+}
+inputmode_t;
 
 // pin definitions here
 
@@ -24,6 +27,12 @@
 #define IN_DATA_PINx	PINB
 #define IN_DATA_MASK	(1 << 0)
 
+// USI DO needs to be known
+#define USI_DO_PORTx	PORTB
+#define USI_DO_DDRx		DDRB
+#define USI_DO_PINx		PINB
+#define USI_DO_MASK		(1 << 1)
+
 // output
 #define OUT_PORTx		PORTB
 #define OUT_DDRx		DDRB
@@ -31,11 +40,14 @@
 #define OUT_MASK		(1 << 4)
 
 // mode select jumper
-#define JMP_SPEED_PORTx		PORTB
-#define JMP_SPEED_DDRx		DDRB
-#define JMP_SPEED_PINx		PINB
-#define JMP_SPEED_MASK		(1 << 3)
-#define IS_NEO_KHZ800()		((PINB & JMP_SPEED_MASK) != 0)
+#define JMP0_PORTx		PORTB
+#define JMP0_DDRx		DDRB
+#define JMP0_PINx		PINB
+#define JMP0_MASK		(1 << 3)
+#define JMP1_PORTx		PORTB
+#define JMP1_DDRx		DDRB
+#define JMP1_PINx		PINB
+#define JMP1_MASK		(1 << 1)
 
 // hardware register selection
 #define TIMEOUT_TCCRnB			TCCR1
@@ -45,46 +57,43 @@
 #define TIMEOUT_OVF_FLAGBIT		OCF1A
 #define TIMEOUT_TIFR			TIFR
 
-#if (INPUT_MODE == INPUT_MODE_I2C)
-	#ifndef I2C_ADDR
-		#error I2C address is not defined in the compiler options
-	#endif
+// speed select
+#define IS_NEO_KHZ800()			(1)
 
-	#define USI_SLAVE_CHECK_ADDRESS                (0x00)
-	#define USI_SLAVE_SEND_DATA                    (0x01)
-	#define USI_SLAVE_REQUEST_REPLY_FROM_SEND_DATA (0x02)
-	#define USI_SLAVE_CHECK_REPLY_FROM_SEND_DATA   (0x03)
-	#define USI_SLAVE_REQUEST_DATA                 (0x04)
-	#define USI_SLAVE_GET_DATA_AND_SEND_ACK        (0x05)
+#define USI_SLAVE_CHECK_ADDRESS                (0x00)
+#define USI_SLAVE_SEND_DATA                    (0x01)
+#define USI_SLAVE_REQUEST_REPLY_FROM_SEND_DATA (0x02)
+#define USI_SLAVE_CHECK_REPLY_FROM_SEND_DATA   (0x03)
+#define USI_SLAVE_REQUEST_DATA                 (0x04)
+#define USI_SLAVE_GET_DATA_AND_SEND_ACK        (0x05)
 
-	static volatile uint8_t USI_TWI_Overflow_State = 0; // 0 means "have not been addressed"
-#elif (INPUT_MODE == INPUT_MODE_UART)
-	
-	#ifndef BAUDRATE
-		#error Use the compiler options to define a BAUDRATE
-	#endif
-	
-	#define DATA_BITS                 8
-	#define START_BIT                 1
-	#define STOP_BIT                  1
-	#define HALF_FRAME                5
+static volatile uint8_t USI_TWI_Overflow_State = 0; // 0 means "have not been addressed"
 
-	#define TIMER_PRESCALER           1
-	#define USI_COUNTER_MAX_COUNT     16
-	#define USI_COUNTER_SEED_TRANSMIT (USI_COUNTER_MAX_COUNT - HALF_FRAME)
-	#define INTERRUPT_STARTUP_DELAY   (0x11 / TIMER_PRESCALER)
-	#define TIMER0_SEED               (256 - ( (F_CPU / BAUDRATE) / TIMER_PRESCALER ))
-
-	#if ( (( (F_CPU / BAUDRATE) / TIMER_PRESCALER ) * 3/2) > (256 - INTERRUPT_STARTUP_DELAY) )
-		#define INITIAL_TIMER0_SEED       ( 256 - (( (F_CPU / BAUDRATE) / TIMER_PRESCALER ) * 1/2) )
-		#define USI_COUNTER_SEED_RECEIVE  ( USI_COUNTER_MAX_COUNT - (START_BIT + DATA_BITS) )
-	#else
-		#define INITIAL_TIMER0_SEED       ( 256 - (( (F_CPU / BAUDRATE) / TIMER_PRESCALER ) * 3/2) )
-		#define USI_COUNTER_SEED_RECEIVE  (USI_COUNTER_MAX_COUNT - DATA_BITS)
-	#endif
-
-	static volatile char is_rxing = 0;
+// defines for UART input mode
+#ifndef BAUDRATE
+	#error Use the compiler options to define a BAUDRATE
 #endif
+
+#define DATA_BITS                 8
+#define START_BIT                 1
+#define STOP_BIT                  1
+#define HALF_FRAME                5
+
+#define TIMER_PRESCALER           1
+#define USI_COUNTER_MAX_COUNT     16
+#define USI_COUNTER_SEED_TRANSMIT (USI_COUNTER_MAX_COUNT - HALF_FRAME)
+#define INTERRUPT_STARTUP_DELAY   (0x11 / TIMER_PRESCALER)
+#define TIMER0_SEED               (256 - ( (F_CPU / BAUDRATE) / TIMER_PRESCALER ))
+
+#if ( (( (F_CPU / BAUDRATE) / TIMER_PRESCALER ) * 3/2) > (256 - INTERRUPT_STARTUP_DELAY) )
+	#define INITIAL_TIMER0_SEED       ( 256 - (( (F_CPU / BAUDRATE) / TIMER_PRESCALER ) * 1/2) )
+	#define USI_COUNTER_SEED_RECEIVE  ( USI_COUNTER_MAX_COUNT - (START_BIT + DATA_BITS) )
+#else
+	#define INITIAL_TIMER0_SEED       ( 256 - (( (F_CPU / BAUDRATE) / TIMER_PRESCALER ) * 3/2) )
+	#define USI_COUNTER_SEED_RECEIVE  (USI_COUNTER_MAX_COUNT - DATA_BITS)
+#endif
+
+static volatile char is_rxing = 0;
 
 // macros
 #define RESET_TIMEOUT_TIMER() do { TIMEOUT_TCNTn = 0; TIMEOUT_TIFR |= _BV(TIMEOUT_OVF_FLAGBIT); } while (0)
@@ -93,6 +102,7 @@
 #define BUFFER_SIZE		((RAMEND - RAMSTART) - (32 * 3)) // if the buffer is too big then we might get a stack collision
 static volatile uint8_t* buffer;
 static volatile uint16_t buffer_idx = 0;
+static inputmode_t input_mode;
 
 // func prototype
 static void send_to_neopixel(void);
@@ -104,13 +114,10 @@ int main(void)
 	// setup pin directions
 	IN_CLK_DDRx &= ~IN_CLK_MASK;
 	IN_DATA_DDRx &= ~IN_DATA_MASK;
-	JMP_SPEED_DDRx &= ~JMP_SPEED_MASK;
 	OUT_DDRx |= OUT_MASK;
 	// no pull-up resistors
 	IN_CLK_PORTx &= ~IN_CLK_MASK;
 	IN_DATA_PORTx &= ~IN_DATA_MASK;
-	// yes pull-up resistors
-	JMP_SPEED_PORTx |= JMP_SPEED_MASK;
 	// default low
 	OUT_PORTx &= ~OUT_MASK;
 	
@@ -120,29 +127,43 @@ int main(void)
 
 	while (1)
 	{
-		#if (INPUT_MODE == INPUT_MODE_SPI)
-		// USI setup for slave 
-		USICR |= _BV(USIWM0) | _BV(USICS1); // 3 wire mode, positive edge triggered
-		USISR = _BV(USIOIF); // clears interrupt and resets counter
-		#elif (INPUT_MODE == INPUT_MODE_UART)
-		USICR  =  0;									// Disable USI, will be enabled by PCINT
-		GIFR   =  (1<<PCIF);							// Clear pin change interrupt flag
-		GIMSK |=  (1<<PCIE);							// Enable pin change interrupt
-		PCMSK |=  (1<<PCINT0);							// Use DI pin
-		sei();
-		#elif (INPUT_MODE == INPUT_MODE_I2C)
-		USICR =	(1<<USISIE)|(0<<USIOIE)|				// Enable Start Condition Interrupt. Disable Overflow Interrupt.
-				(1<<USIWM1)|(1<<USIWM0)|				// Set USI in Two-wire mode. No USI Counter overflow prior
-														// to first Start Condition (potentail failure)
-				(1<<USICS1)|(0<<USICS0)|(0<<USICLK)|	// Shift Register Clock Source = External, positive edge
-				(0<<USITC);
-		USISR = 0xF0;									// Clear all flags and reset overflow counter
-		IN_CLK_DDRx &= ~IN_CLK_MASK;
-		IN_DATA_DDRx &= ~IN_DATA_MASK;
-		sei();
-		#else
-		#error Input Mode Unknown
-		#endif
+		// read the jumpers
+		// question: do the internal pull-up resistors provide a fast enough rise time?
+		JMP0_PORTx |= JMP0_MASK;
+		JMP1_PORTx |= JMP1_MASK;
+		JMP0_DDRx &= ~JMP0_MASK;
+		JMP1_DDRx &= ~JMP1_MASK;
+		input_mode = 0;
+		if (JMP0_PINx & JMP0_MASK) input_mode |= 1;
+		if (JMP1_PINx & JMP1_MASK) input_mode |= 2;
+		USI_DO_PORTx &= ~USI_DO_MASK;
+
+		if (input_mode == INPUTMODE_SPI)
+		{
+			// USI setup for slave 
+			USICR |= _BV(USIWM0) | _BV(USICS1); // 3 wire mode, positive edge triggered
+			USISR = _BV(USIOIF); // clears interrupt and resets counter
+		}
+		else if (input_mode == INPUTMODE_UART)
+		{
+			USICR  =  0;									// Disable USI, will be enabled by PCINT
+			GIFR   =  (1<<PCIF);							// Clear pin change interrupt flag
+			GIMSK |=  (1<<PCIE);							// Enable pin change interrupt
+			PCMSK |=  (1<<PCINT0);							// Use DI pin
+			sei();
+		}
+		else if (input_mode == INPUTMODE_I2C_0XAA || input_mode == INPUTMODE_I2C_0XCC)
+		{
+			USICR =	(1<<USISIE)|(0<<USIOIE)|				// Enable Start Condition Interrupt. Disable Overflow Interrupt.
+					(1<<USIWM1)|(1<<USIWM0)|				// Set USI in Two-wire mode. No USI Counter overflow prior
+															// to first Start Condition (potentail failure)
+					(1<<USICS1)|(0<<USICS0)|(0<<USICLK)|	// Shift Register Clock Source = External, positive edge
+					(0<<USITC);
+			USISR = 0xF0;									// Clear all flags and reset overflow counter
+			IN_CLK_DDRx &= ~IN_CLK_MASK;
+			IN_DATA_DDRx &= ~IN_DATA_MASK;
+			sei();
+		}
 
 		RESET_TIMEOUT_TIMER();
 
@@ -165,25 +186,22 @@ int main(void)
 
 				break; // exit out of the loop, resets timers and USI
 			}
-			#if (INPUT_MODE == INPUT_MODE_SPI)
-			else if (bit_is_set(USISR, USIOIF)) // new data arrived
+			else if (input_mode == INPUTMODE_SPI)
 			{
-				RESET_TIMEOUT_TIMER();
-				buffer[buffer_idx] = USIDR; // take input
-				buffer_idx = buffer_idx < (BUFFER_SIZE - 1) ? (buffer_idx + 1) : (BUFFER_SIZE - 1); // increment index without overflow
-				USIDR = 0; // make sure we don't accidentally send stuff to neopixel
-				USISR |= _BV(USIOIF); // clear the flag
+				if (bit_is_set(USISR, USIOIF)) // new data arrived
+				{
+					RESET_TIMEOUT_TIMER();
+					buffer[buffer_idx] = USIDR; // take input
+					buffer_idx = buffer_idx < (BUFFER_SIZE - 1) ? (buffer_idx + 1) : (BUFFER_SIZE - 1); // increment index without overflow
+					USIDR = 0; // make sure we don't accidentally send stuff to neopixel
+					USISR |= _BV(USIOIF); // clear the flag
+				}
+				else if (buffer_idx <= 0 && (USISR & 0x0F) == 0)
+				{
+					// no data, might as well not bother do timeout
+					RESET_TIMEOUT_TIMER();
+				}
 			}
-			else if (buffer_idx <= 0 && (USISR & 0x0F) == 0)
-			{
-				// no data, might as well not bother do timeout
-				RESET_TIMEOUT_TIMER();
-			}
-			#elif (INPUT_MODE == INPUT_MODE_I2C)
-				// nothing here is needed
-			#elif (INPUT_MODE == INPUT_MODE_UART)
-				// nothing here is needed
-			#endif
 		}
 	}
 
@@ -193,9 +211,6 @@ int main(void)
 static void send_to_neopixel(void)
 {
 	cli(); // timing critical code below, no interrupts allowed
-	// setup jumper detection
-	JMP_SPEED_DDRx &= ~JMP_SPEED_MASK;
-	JMP_SPEED_PORTx |= JMP_SPEED_MASK;
 
 	// code below is copied from Adafruit_NeoPixel.cpp, git hash a494d8992d18d10a3f4b90e92b966aaf1cb2272b
 
@@ -623,13 +638,12 @@ static void send_to_neopixel(void)
 			"w" (i)              // %7
 		); // end asm
 	}
-
 #else
 	#error "CPU SPEED NOT SUPPORTED"
 #endif
 }
 
-#if (INPUT_MODE == INPUT_MODE_UART)
+// code to support UART input mode
 
 static inline uint8_t reverse_bits(uint8_t x)
 {
@@ -639,15 +653,7 @@ static inline uint8_t reverse_bits(uint8_t x)
 	return x; 
 }
 
-ISR (
-	#if defined(USI_OVF_vect)
-	USI_OVF_vect
-	#elif defined(USI_OVERFLOW_vect)
-	USI_OVERFLOW_vect
-	#else
-		#error USI overflow Vector Not Defined
-	#endif
-	)
+static void usi_ovf_vect_uart()
 {
 	uint8_t tmp = USIDR; // take input
 	buffer[buffer_idx] = reverse_bits(tmp);
@@ -697,48 +703,47 @@ ISR (PCINT0_vect)
 		is_rxing = 1;
 	}
 }
-#endif
 
-#if (INPUT_MODE == INPUT_MODE_I2C)
+// code to support I2C input mode
 
 //! Functions implemented as macros
-#define SET_USI_TO_SEND_ACK()                                                                                 \
-{                                                                                                             \
-        USIDR    =  0;                                              /* Prepare ACK                         */ \
-        IN_DATA_DDRx |=  IN_DATA_MASK;                              /* Set SDA as output                   */ \
-        USISR    =  (0<<USISIF)|(1<<USIOIF)|(1<<USIPF)|(1<<USIDC)|  /* Clear all flags, except Start Cond  */ \
-                    (0x0E<<USICNT0);                                /* set USI counter to shift 1 bit.     */ \
+#define SET_USI_TO_SEND_ACK()                                                                             \
+{                                                                                                         \
+	USIDR    =  0;                                              /* Prepare ACK                         */ \
+	IN_DATA_DDRx |=  IN_DATA_MASK;                              /* Set SDA as output                   */ \
+	USISR    =  (0<<USISIF)|(1<<USIOIF)|(1<<USIPF)|(1<<USIDC)|  /* Clear all flags, except Start Cond  */ \
+				(0x0E<<USICNT0);                                /* set USI counter to shift 1 bit.     */ \
 }
 
-#define SET_USI_TO_READ_ACK()                                                                                 \
-{                                                                                                             \
-        IN_DATA_DDRx &= ~IN_DATA_MASK;                              /* Set SDA as intput  */                  \
-        USIDR    =  0;                                              /* Prepare ACK        */                  \
-        USISR    =  (0<<USISIF)|(1<<USIOIF)|(1<<USIPF)|(1<<USIDC)|  /* Clear all flags, except Start Cond  */ \
-                    (0x0E<<USICNT0);                                /* set USI counter to shift 1 bit.     */ \
+#define SET_USI_TO_READ_ACK()                                                                             \
+{                                                                                                         \
+	IN_DATA_DDRx &= ~IN_DATA_MASK;                              /* Set SDA as intput  */                  \
+	USIDR    =  0;                                              /* Prepare ACK        */                  \
+	USISR    =  (0<<USISIF)|(1<<USIOIF)|(1<<USIPF)|(1<<USIDC)|  /* Clear all flags, except Start Cond  */ \
+				(0x0E<<USICNT0);                                /* set USI counter to shift 1 bit.     */ \
 }
 
-#define SET_USI_TO_TWI_START_CONDITION_MODE()                                                                                     \
-{                                                                                                                                 \
-  USICR    =  (1<<USISIE)|(0<<USIOIE)|                        /* Enable Start Condition Interrupt. Disable Overflow Interrupt.*/  \
-              (1<<USIWM1)|(0<<USIWM0)|                        /* Set USI in Two-wire mode. No USI Counter overflow hold.      */  \
-              (1<<USICS1)|(0<<USICS0)|(0<<USICLK)|            /* Shift Register Clock Source = External, positive edge        */  \
-              (0<<USITC);                                                                                                         \
-  USISR    =  (0<<USISIF)|(1<<USIOIF)|(1<<USIPF)|(1<<USIDC)|  /* Clear all flags, except Start Cond                           */  \
-              (0x0<<USICNT0);                                                                                                     \
+#define SET_USI_TO_TWI_START_CONDITION_MODE()                                                                                   \
+{                                                                                                                               \
+	USICR = (1<<USISIE)|(0<<USIOIE)|                        /* Enable Start Condition Interrupt. Disable Overflow Interrupt.*/  \
+		    (1<<USIWM1)|(0<<USIWM0)|                        /* Set USI in Two-wire mode. No USI Counter overflow hold.      */  \
+		    (1<<USICS1)|(0<<USICS0)|(0<<USICLK)|            /* Shift Register Clock Source = External, positive edge        */  \
+		    (0<<USITC);                                                                                                         \
+	USISR = (0<<USISIF)|(1<<USIOIF)|(1<<USIPF)|(1<<USIDC)|  /* Clear all flags, except Start Cond                           */  \
+		    (0x0<<USICNT0);                                                                                                     \
 }
 
 #define SET_USI_TO_SEND_DATA()                                                                               \
 {                                                                                                            \
-    IN_DATA_DDRx |=  IN_DATA_MASK;                                  /* Set SDA as output                  */ \
-    USISR    =  (0<<USISIF)|(1<<USIOIF)|(1<<USIPF)|(1<<USIDC)|      /* Clear all flags, except Start Cond */ \
+	IN_DATA_DDRx |=  IN_DATA_MASK;                                  /* Set SDA as output                  */ \
+	USISR    =  (0<<USISIF)|(1<<USIOIF)|(1<<USIPF)|(1<<USIDC)|      /* Clear all flags, except Start Cond */ \
                 (0x0<<USICNT0);                                     /* set USI to shift out 8 bits        */ \
 }
 
 #define SET_USI_TO_READ_DATA()                                                                               \
 {                                                                                                            \
-    IN_DATA_DDRx &= ~IN_DATA_MASK;                                  /* Set SDA as input                   */ \
-    USISR    =  (0<<USISIF)|(1<<USIOIF)|(1<<USIPF)|(1<<USIDC)|      /* Clear all flags, except Start Cond */ \
+	IN_DATA_DDRx &= ~IN_DATA_MASK;                                  /* Set SDA as input                   */ \
+	USISR    =  (0<<USISIF)|(1<<USIOIF)|(1<<USIPF)|(1<<USIDC)|      /* Clear all flags, except Start Cond */ \
                 (0x0<<USICNT0);                                     /* set USI to shift in 8 bits         */ \
 }
 
@@ -770,15 +775,7 @@ ISR (
 	RESET_TIMEOUT_TIMER();
 }
 
-ISR (
-	#if defined(USI_OVF_vect)
-	USI_OVF_vect
-	#elif defined(USI_OVERFLOW_vect)
-	USI_OVERFLOW_vect
-	#else
-		#error USI overflow Vector Not Defined
-	#endif
-	)
+void usi_ovf_vect_i2c()
 {
 	IN_CLK_DDRx |= IN_CLK_MASK; // clock stretch
 
@@ -792,7 +789,10 @@ ISR (
 		// Check address and send ACK (and next USI_SLAVE_SEND_DATA) if OK, else reset USI.
 		case USI_SLAVE_CHECK_ADDRESS:
 			tmpUSIDR = USIDR;
-			if ((tmpUSIDR == 0) || (( tmpUSIDR>>1 ) == (I2C_ADDR>>1)))
+			if (tmpUSIDR == 0 ||
+				(( tmpUSIDR>>1 ) == (0xAA>>1) && input_mode == INPUTMODE_I2C_0XAA) ||
+				(( tmpUSIDR>>1 ) == (0xCC>>1) && input_mode == INPUTMODE_I2C_0XCC)
+				)
 			{
 				if ( tmpUSIDR & TW_READ )
 					USI_TWI_Overflow_State = USI_SLAVE_SEND_DATA;
@@ -854,4 +854,18 @@ ISR (
 	IN_CLK_DDRx &= ~IN_CLK_MASK; // release clock
 }
 
-#endif
+// overflow vector needs to make the decision about which mode
+
+ISR (
+	#if defined(USI_OVF_vect)
+	USI_OVF_vect
+	#elif defined(USI_OVERFLOW_vect)
+	USI_OVERFLOW_vect
+	#else
+		#error USI overflow Vector Not Defined
+	#endif
+	)
+{
+	if (input_mode == INPUTMODE_UART) usi_ovf_vect_uart();
+	else if (input_mode >= INPUTMODE_I2C_0XAA) usi_ovf_vect_i2c();
+}

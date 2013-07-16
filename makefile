@@ -8,9 +8,7 @@ CC = avr-gcc
 CCXX = avr-g++
 
 ## Project specific options here
-INPUT_MODE = 2
-BAUDRATE = 38400
-I2C_ADDR = 0xAA
+BAUDRATE = 57600
 
 ## Flags common to C, ASM, and Linker
 COMMON = -mmcu=$(MCU)
