@@ -180,6 +180,7 @@ int main(void)
 					TCCR0B = 0;
 
 					send_to_neopixel();
+					// 50 uS delay would be a good idea here
 
 					buffer_idx = 0; // no more data
 				}
@@ -191,8 +192,7 @@ int main(void)
 				if (bit_is_set(USISR, USIOIF)) // new data arrived
 				{
 					RESET_TIMEOUT_TIMER();
-					buffer[buffer_idx] = USIDR; // take input
-					buffer_idx = buffer_idx < (BUFFER_SIZE - 1) ? (buffer_idx + 1) : (BUFFER_SIZE - 1); // increment index without overflow
+					if(buffer_idx < BUFFER_SIZE) buffer[buffer_idx++] = USIDR;	// take input w/o overflow
 					USIDR = 0; // make sure we don't accidentally send stuff to neopixel
 					USISR |= _BV(USIOIF); // clear the flag
 				}
@@ -656,8 +656,7 @@ static inline uint8_t reverse_bits(uint8_t x)
 static void usi_ovf_vect_uart()
 {
 	uint8_t tmp = USIDR; // take input
-	buffer[buffer_idx] = reverse_bits(tmp);
-	buffer_idx = buffer_idx < (BUFFER_SIZE - 1) ? (buffer_idx + 1) : (BUFFER_SIZE - 1); // increment index without overflow
+	if(buffer_idx < BUFFER_SIZE) buffer[buffer_idx++] = reverse_bits(tmp);	// increment w/o overflow
 	USIDR  = 0;									// make sure we don't accidentally send stuff to neopixel
 	TCCR0B = (0<<CS02)|(0<<CS01)|(0<<CS00);		// Stop Timer0.
 	USICR  =  0;								// Disable USI.
@@ -841,9 +840,7 @@ void usi_ovf_vect_i2c()
 		case USI_SLAVE_GET_DATA_AND_SEND_ACK:
 			// Put data into Buffer
 			tmpUSIDR = USIDR;             // Not necessary, but prevents warnings
-
-			buffer[buffer_idx] = tmpUSIDR; // take input
-			buffer_idx = buffer_idx < (BUFFER_SIZE - 1) ? (buffer_idx + 1) : (BUFFER_SIZE - 1); // increment index without overflow
+			if(buffer_idx < BUFFER_SIZE) buffer[buffer_idx++] = tmpUSIDR;	// increment index w/o overflow
 
 			USI_TWI_Overflow_State = USI_SLAVE_REQUEST_DATA;
 			SET_USI_TO_SEND_ACK();
