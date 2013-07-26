@@ -654,7 +654,7 @@ static inputmode_t get_input_mode()
 	if ((JMP_PINx & JMP_MASK) == 0) {
 		// reading logic low even though there's a pull-up resistor?
 		// jumper is tied to ground
-		// note: the external pull-down resistor might have magnitudes higher resistance than the internal pull-up resistor
+		// note: the external pull-down resistor must have magnitudes higher resistance than the internal pull-up resistor
 		return INPUTMODE_I2C;
 	}
 	// if it's not the above two, then jumper is floating
