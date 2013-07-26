@@ -10,8 +10,7 @@
 typedef enum {
 	INPUTMODE_SPI = 0,
 	INPUTMODE_UART = 1,
-	INPUTMODE_I2C_0XAA = 2,
-	INPUTMODE_I2C_0XCC = 3,
+	INPUTMODE_I2C = 2,
 }
 inputmode_t;
 
@@ -26,6 +25,10 @@ inputmode_t;
 #define IN_DATA_DDRx	DDRB
 #define IN_DATA_PINx	PINB
 #define IN_DATA_MASK	(1 << 0)
+#define IN_LATCH_PORTx	PORTB
+#define IN_LATCH_DDRx	DDRB
+#define IN_LATCH_PINx	PINB
+#define IN_LATCH_MASK	(1 << 3)
 
 // USI DO needs to be known
 #define USI_DO_PORTx	PORTB
@@ -39,33 +42,21 @@ inputmode_t;
 #define OUT_PINx		PINB
 #define OUT_MASK		(1 << 4)
 
-// mode select jumper
-#define JMP0_PORTx		PORTB
-#define JMP0_DDRx		DDRB
-#define JMP0_PINx		PINB
-#define JMP0_MASK		(1 << 3)
-#define JMP1_PORTx		PORTB
-#define JMP1_DDRx		DDRB
-#define JMP1_PINx		PINB
-#define JMP1_MASK		(1 << 1)
-
-// hardware register selection
-#define TIMEOUT_TCCRnB			TCCR1
-#define TIMEOUT_OCRnx			OCR1A
-#define TIMEOUT_TCNTn			TCNT1
-#define TIMEOUT_CTCn			CTC1
-#define TIMEOUT_OVF_FLAGBIT		OCF1A
-#define TIMEOUT_TIFR			TIFR
+// mode select jumper (must have a 1 Mohm resistor to ground, we need to detect 3 states)
+#define JMP_PORTx		PORTB
+#define JMP_DDRx		DDRB
+#define JMP_PINx		PINB
+#define JMP_MASK		(1 << 1)
 
 // speed select
-#define IS_NEO_KHZ800()			(1)
+#define IS_NEO_KHZ800()			(1)	// 400 KHz is deprecated
 
-#define USI_SLAVE_CHECK_ADDRESS                (0x00)
-#define USI_SLAVE_SEND_DATA                    (0x01)
-#define USI_SLAVE_REQUEST_REPLY_FROM_SEND_DATA (0x02)
-#define USI_SLAVE_CHECK_REPLY_FROM_SEND_DATA   (0x03)
-#define USI_SLAVE_REQUEST_DATA                 (0x04)
-#define USI_SLAVE_GET_DATA_AND_SEND_ACK        (0x05)
+#define USI_SLAVE_CHECK_ADDRESS					(0x00)
+#define USI_SLAVE_SEND_DATA						(0x01)
+#define USI_SLAVE_REQUEST_REPLY_FROM_SEND_DATA	(0x02)
+#define USI_SLAVE_CHECK_REPLY_FROM_SEND_DATA	(0x03)
+#define USI_SLAVE_REQUEST_DATA					(0x04)
+#define USI_SLAVE_GET_DATA_AND_SEND_ACK			(0x05)
 
 static volatile uint8_t USI_TWI_Overflow_State = 0; // 0 means "have not been addressed"
 
@@ -95,9 +86,6 @@ static volatile uint8_t USI_TWI_Overflow_State = 0; // 0 means "have not been ad
 
 static volatile char is_rxing = 0;
 
-// macros
-#define RESET_TIMEOUT_TIMER() do { TIMEOUT_TCNTn = 0; TIMEOUT_TIFR |= _BV(TIMEOUT_OVF_FLAGBIT); } while (0)
-
 // global vars
 #define BUFFER_SIZE		((RAMEND - RAMSTART) - (32 * 3)) // if the buffer is too big then we might get a stack collision
 static volatile uint8_t* buffer;
@@ -106,10 +94,15 @@ static inputmode_t input_mode;
 
 // func prototype
 static void send_to_neopixel(void);
+static inputmode_t get_input_mode(void);
 
 int main(void)
 {
-	buffer = (uint8_t*)malloc(BUFFER_SIZE + 1);
+	// we drive the latch low at startup to indicate that we are busy
+	IN_LATCH_DDRx  |=  IN_LATCH_MASK;
+	IN_LATCH_PORTx &= ~IN_LATCH_MASK;
+
+	buffer = (uint8_t*)malloc(BUFFER_SIZE + 1); // compile time allocation doesn't seem to work for some reason... so here we do run time allocation
 
 	// setup pin directions
 	IN_CLK_DDRx &= ~IN_CLK_MASK;
@@ -120,23 +113,12 @@ int main(void)
 	IN_DATA_PORTx &= ~IN_DATA_MASK;
 	// default low
 	OUT_PORTx &= ~OUT_MASK;
-	
-	// setup timer to gauge timeout (blank time of 500uS means end of frame)
-	TIMEOUT_TCCRnB = _BV(CTC1) | 0x06; // CTC mode
-	TIMEOUT_OCRnx = 125; // this is about 500uS
+
+	uint8_t cur_latch, last_latch;
 
 	while (1)
 	{
-		// read the jumpers
-		// question: do the internal pull-up resistors provide a fast enough rise time?
-		JMP0_PORTx |= JMP0_MASK;
-		JMP1_PORTx |= JMP1_MASK;
-		JMP0_DDRx &= ~JMP0_MASK;
-		JMP1_DDRx &= ~JMP1_MASK;
-		input_mode = 0;
-		if (JMP0_PINx & JMP0_MASK) input_mode |= 1;
-		if (JMP1_PINx & JMP1_MASK) input_mode |= 2;
-		USI_DO_PORTx &= ~USI_DO_MASK;
+		input_mode = get_input_mode();
 
 		if (input_mode == INPUTMODE_SPI)
 		{
@@ -152,7 +134,7 @@ int main(void)
 			PCMSK |=  (1<<PCINT0);							// Use DI pin
 			sei();
 		}
-		else if (input_mode == INPUTMODE_I2C_0XAA || input_mode == INPUTMODE_I2C_0XCC)
+		else if (input_mode == INPUTMODE_I2C)
 		{
 			USICR =	(1<<USISIE)|(0<<USIOIE)|				// Enable Start Condition Interrupt. Disable Overflow Interrupt.
 					(1<<USIWM1)|(1<<USIWM0)|				// Set USI in Two-wire mode. No USI Counter overflow prior
@@ -165,12 +147,27 @@ int main(void)
 			sei();
 		}
 
-		RESET_TIMEOUT_TIMER();
+		// release the latch pin to indicate that it is no longer busy
+		IN_LATCH_DDRx  &= ~IN_LATCH_MASK;
+		IN_LATCH_PORTx |=  IN_LATCH_MASK; // activate internal pull-up resistor
+
+		// reset falling edge detection
+		last_latch = IN_LATCH_MASK;
+		cur_latch = IN_LATCH_MASK;
 
 		while (1)
 		{
-			if (bit_is_set(TIMEOUT_TIFR, TIMEOUT_OVF_FLAGBIT)) // timeout waiting for data
+			if (((last_latch & IN_LATCH_MASK) != 0 && (cur_latch & IN_LATCH_MASK) == 0) || (input_mode == INPUTMODE_I2C && bit_is_set(USISR, USIPF))) // falling edge or I2C stop condition
 			{
+				// drive the latch pin low to indicate that it is busy
+				IN_LATCH_PORTx &= ~IN_LATCH_MASK;
+				IN_LATCH_DDRx  |=  IN_LATCH_MASK;
+
+				if (bit_is_set(USISR, USIPF)) {
+					// clear the stop condition flag if set
+					USISR |= _BV(USIPF);
+				}
+
 				if (buffer_idx > 0) // only if at least one byte is RX'ed
 				{
 					// shutdown the USI
@@ -184,24 +181,22 @@ int main(void)
 					buffer_idx = 0; // no more data
 				}
 
-				break; // exit out of the loop, resets timers and USI
+				break; // exit out of the loop reset USI
 			}
 			else if (input_mode == INPUTMODE_SPI)
 			{
 				if (bit_is_set(USISR, USIOIF)) // new data arrived
 				{
-					RESET_TIMEOUT_TIMER();
 					buffer[buffer_idx] = USIDR; // take input
 					buffer_idx = buffer_idx < (BUFFER_SIZE - 1) ? (buffer_idx + 1) : (BUFFER_SIZE - 1); // increment index without overflow
 					USIDR = 0; // make sure we don't accidentally send stuff to neopixel
 					USISR |= _BV(USIOIF); // clear the flag
 				}
-				else if (buffer_idx <= 0 && (USISR & 0x0F) == 0)
-				{
-					// no data, might as well not bother do timeout
-					RESET_TIMEOUT_TIMER();
-				}
 			}
+
+			// falling edge detection
+			last_latch = cur_latch;
+			cur_latch = IN_LATCH_PINx;
 		}
 	}
 
@@ -217,9 +212,9 @@ static void send_to_neopixel(void)
 	volatile uint16_t i = buffer_idx; // Loop counter
 	volatile uint8_t next, bit;
 	volatile uint8_t
-	*ptr = &buffer[0],		// Pointer to next byte
-	b	= *ptr++,		// Current byte value
-	hi,					// PORT w/output bit set high
+	*ptr	= &buffer[0],	// Pointer to next byte
+	b		= *ptr++,		// Current byte value
+	hi,						// PORT w/output bit set high
 	lo; 
 	// Hand-tuned assembly code issues data to the LED drivers at a specific
 	// rate.  There's separate code for different CPU speeds (8, 12, 16 MHz)
@@ -643,6 +638,30 @@ static void send_to_neopixel(void)
 #endif
 }
 
+static inputmode_t get_input_mode()
+{
+	USICR = 0; // turn off USI so it doesn't drive the pins
+	JMP_DDRx &= ~JMP_MASK; // pin is input
+	JMP_PORTx &= ~JMP_MASK; // turn off internal pull-up resistor
+	asm volatile ("rjmp .+0\n\t"); // small delay
+	if ((JMP_PINx & JMP_MASK) != 0) {
+		// reading logic high even though there's an externally implemented pull-down resistor?
+		// jumper is tied to VCC
+		return INPUTMODE_SPI;
+	}
+	JMP_PORTx |= JMP_MASK; // activate internal pull-up resistor
+	asm volatile ("rjmp .+0\n\t"); // small delay
+	if ((JMP_PINx & JMP_MASK) == 0) {
+		// reading logic low even though there's a pull-up resistor?
+		// jumper is tied to ground
+		// note: the external pull-down resistor might have magnitudes higher resistance than the internal pull-up resistor
+		return INPUTMODE_I2C;
+	}
+	// if it's not the above two, then jumper is floating
+	JMP_PORTx &= ~JMP_MASK; // turn off resistor
+	return INPUTMODE_UART;
+}
+
 // code to support UART input mode
 
 static inline uint8_t reverse_bits(uint8_t x)
@@ -664,7 +683,6 @@ static void usi_ovf_vect_uart()
 	GIFR   =  (1<<PCIF);						// Clear pin change interrupt flag.
 	GIMSK |=  (1<<PCIE);						// Enable pin change interrupt for PB3:0.
 	is_rxing = 0;
-	RESET_TIMEOUT_TIMER();
 }
 
 ISR (
@@ -772,7 +790,6 @@ ISR (
 				(0<<USITC);
 	USISR =		(1<<USISIF)|(1<<USIOIF)|(1<<USIPF)|(1<<USIDC)|				// Clear flags
 				(0x0<<USICNT0);
-	RESET_TIMEOUT_TIMER();
 }
 
 void usi_ovf_vect_i2c()
@@ -781,8 +798,6 @@ void usi_ovf_vect_i2c()
 
 	unsigned char tmpUSIDR;
 
-	RESET_TIMEOUT_TIMER();
-
 	switch (USI_TWI_Overflow_State)
 	{
 		// ---------- Address mode ----------
@@ -790,9 +805,7 @@ void usi_ovf_vect_i2c()
 		case USI_SLAVE_CHECK_ADDRESS:
 			tmpUSIDR = USIDR;
 			if (tmpUSIDR == 0 ||
-				(( tmpUSIDR>>1 ) == (0xAA>>1) && input_mode == INPUTMODE_I2C_0XAA) ||
-				(( tmpUSIDR>>1 ) == (0xCC>>1) && input_mode == INPUTMODE_I2C_0XCC)
-				)
+				( tmpUSIDR>>1 ) == (I2C_ADDR>>1))
 			{
 				if ( tmpUSIDR & TW_READ )
 					USI_TWI_Overflow_State = USI_SLAVE_SEND_DATA;
@@ -867,5 +880,5 @@ ISR (
 	)
 {
 	if (input_mode == INPUTMODE_UART) usi_ovf_vect_uart();
-	else if (input_mode >= INPUTMODE_I2C_0XAA) usi_ovf_vect_i2c();
+	else if (input_mode == INPUTMODE_I2C) usi_ovf_vect_i2c();
 }

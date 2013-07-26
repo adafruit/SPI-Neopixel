@@ -9,6 +9,7 @@ CCXX = avr-g++
 
 ## Project specific options here
 BAUDRATE = 57600
+I2C_ADDR = 0xAA
 
 ## Flags common to C, ASM, and Linker
 COMMON = -mmcu=$(MCU)
