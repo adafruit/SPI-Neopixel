@@ -157,7 +157,7 @@ int main(void)
 
 		while (1)
 		{
-			if (((last_latch & IN_LATCH_MASK) != 0 && (cur_latch & IN_LATCH_MASK) == 0) || (input_mode == INPUTMODE_I2C && bit_is_set(USISR, USIPF))) // falling edge or I2C stop condition
+			if ((input_mode != INPUTMODE_I2C && (last_latch & IN_LATCH_MASK) != 0 && (cur_latch & IN_LATCH_MASK) == 0) || (input_mode == INPUTMODE_I2C && bit_is_set(USISR, USIPF))) // falling edge or I2C stop condition
 			{
 				// drive the latch pin low to indicate that it is busy
 				IN_LATCH_PORTx &= ~IN_LATCH_MASK;
@@ -775,27 +775,59 @@ ISR (
 	#else
 		#error USI Start Condition Vector Not Defined
 	#endif
-	)
+	, ISR_NAKED)
 {
-	unsigned char tmpUSISR;										// Temporary variable to store volatile
-	tmpUSISR = USISR;												// Not necessary, but prevents warnings
+	IN_CLK_DDRx  |=  IN_CLK_MASK; // clock stretch
+	IN_CLK_PORTx &= ~IN_CLK_MASK; // by driving low
+	IN_DATA_DDRx  &= ~IN_DATA_MASK; // Set SDA as input
+
+	asm volatile ("\n\t"
+		"push r1\n\t"
+		"push r0\n\t"
+		"in r0, %0\n\t" // save SREG
+		"push r0\n\t"
+		"eor r1, r1\n\t" // make 0
+		"push r2\n\t" "push r3\n\t" "push r4\n\t" "push r5\n\t" "push r6\n\t"
+		"push r7\n\t" "push r8\n\t" "push r9\n\t" "push r10\n\t" "push r11\n\t"
+		"push r12\n\t" "push r13\n\t" "push r14\n\t" "push r15\n\t" "push r16\n\t"
+		"push r17\n\t" "push r18\n\t" "push r19\n\t" "push r20\n\t" "push r21\n\t"
+		"push r22\n\t" "push r23\n\t" "push r24\n\t" "push r25\n\t" "push r26\n\t"
+		"push r27\n\t" "push r28\n\t" "push r29\n\t" "push r30\n\t" "push r31\n\t"
+		::
+		"I" (_SFR_IO_ADDR(SREG))
+	);
+
 	// Set default starting conditions for new TWI package
 	USI_TWI_Overflow_State = USI_SLAVE_CHECK_ADDRESS;
-	IN_DATA_DDRx  &= ~IN_DATA_MASK;											// Set SDA as input
-	while ( (IN_DATA_PINx & IN_DATA_MASK) & !(tmpUSISR & (1<<USIPF)) );		// Wait for SCL to go low to ensure the "Start Condition" has completed.
-																			// If a Stop condition arises then leave the interrupt to prevent waiting forever.
+
 	USICR =		(1<<USISIE)|(1<<USIOIE)|									// Enable Overflow and Start Condition Interrupt. (Keep StartCondInt to detect RESTART)
 				(1<<USIWM1)|(1<<USIWM0)|									// Set USI in Two-wire mode.
 				(1<<USICS1)|(0<<USICS0)|(0<<USICLK)|						// Shift Register Clock Source = External, positive edge
 				(0<<USITC);
 	USISR =		(1<<USISIF)|(1<<USIOIF)|(1<<USIPF)|(1<<USIDC)|				// Clear flags
 				(0x0<<USICNT0);
+
+	asm volatile ("\n\t"
+		"pop r31\n\t" "pop r30\n\t" "pop r29\n\t" "pop r28\n\t" "pop r27\n\t"
+		"pop r26\n\t" "pop r25\n\t" "pop r24\n\t" "pop r23\n\t" "pop r22\n\t"
+		"pop r21\n\t" "pop r20\n\t" "pop r19\n\t" "pop r18\n\t" "pop r17\n\t"
+		"pop r16\n\t" "pop r15\n\t" "pop r14\n\t" "pop r13\n\t" "pop r12\n\t"
+		"pop r11\n\t" "pop r10\n\t" "pop r9\n\t" "pop r8\n\t" "pop r7\n\t"
+		"pop r6\n\t" "pop r5\n\t" "pop r4\n\t" "pop r3\n\t" "pop r2\n\t"
+		"pop r0\n\t"
+		"out %0, r0\n\t" // restore SREG
+		"pop r0\n\t"
+		"pop r1\n\t"
+		::
+		"I" (_SFR_IO_ADDR(SREG))
+	);
+
+	IN_CLK_DDRx &= ~IN_CLK_MASK; // release clock
+	asm volatile ("reti\n\t");
 }
 
 void usi_ovf_vect_i2c()
 {
-	IN_CLK_DDRx |= IN_CLK_MASK; // clock stretch
-
 	unsigned char tmpUSIDR;
 
 	switch (USI_TWI_Overflow_State)
@@ -864,7 +896,6 @@ void usi_ovf_vect_i2c()
 	}
 
 	USISR |= _BV(USIOIF); // clear the flag
-	IN_CLK_DDRx &= ~IN_CLK_MASK; // release clock
 }
 
 // overflow vector needs to make the decision about which mode
@@ -877,8 +908,45 @@ ISR (
 	#else
 		#error USI overflow Vector Not Defined
 	#endif
-	)
+	, ISR_NAKED)
 {
+	IN_CLK_DDRx  |=  IN_CLK_MASK; // clock stretch
+	IN_CLK_PORTx &= ~IN_CLK_MASK; // by driving low
+
+	asm volatile ("\n\t"
+		"push r1\n\t"
+		"push r0\n\t"
+		"in r0, %0\n\t" // save SREG
+		"push r0\n\t"
+		"eor r1, r1\n\t" // make 0
+		"push r2\n\t" "push r3\n\t" "push r4\n\t" "push r5\n\t" "push r6\n\t"
+		"push r7\n\t" "push r8\n\t" "push r9\n\t" "push r10\n\t" "push r11\n\t"
+		"push r12\n\t" "push r13\n\t" "push r14\n\t" "push r15\n\t" "push r16\n\t"
+		"push r17\n\t" "push r18\n\t" "push r19\n\t" "push r20\n\t" "push r21\n\t"
+		"push r22\n\t" "push r23\n\t" "push r24\n\t" "push r25\n\t" "push r26\n\t"
+		"push r27\n\t" "push r28\n\t" "push r29\n\t" "push r30\n\t" "push r31\n\t"
+		::
+		"I" (_SFR_IO_ADDR(SREG))
+	);
+
 	if (input_mode == INPUTMODE_UART) usi_ovf_vect_uart();
 	else if (input_mode == INPUTMODE_I2C) usi_ovf_vect_i2c();
+
+	asm volatile ("\n\t"
+		"pop r31\n\t" "pop r30\n\t" "pop r29\n\t" "pop r28\n\t" "pop r27\n\t"
+		"pop r26\n\t" "pop r25\n\t" "pop r24\n\t" "pop r23\n\t" "pop r22\n\t"
+		"pop r21\n\t" "pop r20\n\t" "pop r19\n\t" "pop r18\n\t" "pop r17\n\t"
+		"pop r16\n\t" "pop r15\n\t" "pop r14\n\t" "pop r13\n\t" "pop r12\n\t"
+		"pop r11\n\t" "pop r10\n\t" "pop r9\n\t" "pop r8\n\t" "pop r7\n\t"
+		"pop r6\n\t" "pop r5\n\t" "pop r4\n\t" "pop r3\n\t" "pop r2\n\t"
+		"pop r0\n\t"
+		"out %0, r0\n\t" // restore SREG
+		"pop r0\n\t"
+		"pop r1\n\t"
+		::
+		"I" (_SFR_IO_ADDR(SREG))
+	);
+
+	IN_CLK_DDRx &= ~IN_CLK_MASK; // release clock
+	asm volatile ("reti\n\t");
 }
