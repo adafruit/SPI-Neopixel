@@ -1,0 +1,43 @@
+F_CPU      = 16500000
+BAUDRATE   = 115200
+I2C_ADDR   = 0x46
+INPUT_MODE = "UART"
+
+COMMON     = -mmcu=$(MCU)
+CFLAGS     = $(COMMON)
+CFLAGS    += -Wall -pedantic -std=gnu99 -Os -ffunction-sections -fdata-sections
+CFLAGS    += -DF_CPU=$(F_CPU) -DBAUDRATE=$(BAUDRATE) -DI2C_ADDR=$(I2C_ADDR)
+LDFLAGS    = $(COMMON)
+HEX_FLASH_FLAGS = -R .eeprom -R .fuse -R .lock -R .signature
+
+TOOLS      = /Applications/Arduino.app/Contents/Resources/Java/hardware/tools/avr/bin
+CC         = $(TOOLS)/avr-gcc
+OBJCOPY    = $(TOOLS)/avr-objcopy
+SIZE       = $(TOOLS)/avr-size
+AVRCONF    = $(TOOLS)/../etc/avrdude.conf
+AVRDUDE    = $(TOOLS)/avrdude -C $(AVRCONF)
+
+MCU        = attiny85
+PROGRAMMER = usbtiny
+
+all: alt.elf
+
+alt.elf: alt.o
+	$(CC) $(LDFLAGS) alt.o -o alt.elf
+	$(OBJCOPY) -O ihex $(HEX_FLASH_FLAGS) alt.elf alt.hex
+	$(SIZE) -C --mcu=${MCU} alt.elf
+
+alt.o: alt.c reverse_bits.h
+	$(CC) $(CFLAGS) -c alt.c
+
+burn: alt.elf
+
+burn:
+	$(AVRDUDE) -p $(MCU) -c $(PROGRAMMER)  -U flash:w:alt.hex:a 
+
+burnfuses:
+	$(AVRDUDE) -p $(MCU) -c $(PROGRAMMER)  -U lfuse:w:0xE2:m -U hfuse:w:0xD7:m
+
+.PHONY: clean
+clean:
+	-rm -rf alt.o alt.elf alt.hex
