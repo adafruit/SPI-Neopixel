@@ -5,6 +5,7 @@
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <util/twi.h>
+#include <util/delay.h>
 #include <stdlib.h>
 
 typedef enum {
@@ -14,51 +15,78 @@ typedef enum {
 }
 inputmode_t;
 
+typedef enum
+{
+	USI_SLAVE_CHECK_ADDRESS = 0,
+	USI_SLAVE_SEND_DATA,
+	USI_SLAVE_REQUEST_REPLY_FROM_SEND_DATA,
+	USI_SLAVE_CHECK_REPLY_FROM_SEND_DATA,
+	USI_SLAVE_REQUEST_DATA,
+	USI_SLAVE_GET_DATA_AND_SEND_ACK,
+}
+USI_TWI_state_t;
+
 // pin definitions here
 
 // input should be the USI
 #define IN_CLK_PORTx	PORTB
 #define IN_CLK_DDRx		DDRB
 #define IN_CLK_PINx		PINB
-#define IN_CLK_MASK		(1 << 2)
+#define IN_CLK_BIT		2
+#define IN_CLK_MASK		(1 << IN_CLK_BIT)
 #define IN_DATA_PORTx	PORTB
 #define IN_DATA_DDRx	DDRB
 #define IN_DATA_PINx	PINB
-#define IN_DATA_MASK	(1 << 0)
+#define IN_DATA_BIT		0
+#define IN_DATA_MASK	(1 << IN_DATA_BIT)
 #define IN_LATCH_PORTx	PORTB
 #define IN_LATCH_DDRx	DDRB
 #define IN_LATCH_PINx	PINB
-#define IN_LATCH_MASK	(1 << 3)
+#define IN_LATCH_BIT	3
+#define IN_LATCH_MASK	(1 << IN_LATCH_BIT)
 
 // USI DO needs to be known
 #define USI_DO_PORTx	PORTB
 #define USI_DO_DDRx		DDRB
 #define USI_DO_PINx		PINB
-#define USI_DO_MASK		(1 << 1)
+#define USI_DO_BIT		1
+#define USI_DO_MASK		(1 << USI_DO_BIT)
 
-// output
+// NeoPixel output pin
 #define OUT_PORTx		PORTB
 #define OUT_DDRx		DDRB
 #define OUT_PINx		PINB
-#define OUT_MASK		(1 << 4)
+#define OUT_BIT			4
+#define OUT_MASK		(1 << OUT_BIT)
 
-// mode select jumper (must have a 1 Mohm resistor to ground, we need to detect 3 states)
+// mode select jumper
+// must have a 1 Mohm resistor to ground, we need to detect 3 states
+// VCC = SPI, ->1M->GND = I2C, N/C = UART
 #define JMP_PORTx		PORTB
 #define JMP_DDRx		DDRB
 #define JMP_PINx		PINB
-#define JMP_MASK		(1 << 1)
+#define JMP_BIT			1
+#define JMP_MASK		(1 << JMP_BIT)
 
 // speed select
 #define IS_NEO_KHZ800()			(1)	// 400 KHz is deprecated
 
-#define USI_SLAVE_CHECK_ADDRESS					(0x00)
-#define USI_SLAVE_SEND_DATA						(0x01)
-#define USI_SLAVE_REQUEST_REPLY_FROM_SEND_DATA	(0x02)
-#define USI_SLAVE_CHECK_REPLY_FROM_SEND_DATA	(0x03)
-#define USI_SLAVE_REQUEST_DATA					(0x04)
-#define USI_SLAVE_GET_DATA_AND_SEND_ACK			(0x05)
+// latch macros
+// drive low to indicate we are busy, no data is accepted during this time
+#define LATCH_BUSY()	do { IN_LATCH_DDRx |= IN_LATCH_MASK; IN_LATCH_PORTx &= ~IN_LATCH_MASK; } while (0)
+// release the pin (set as input) and activate the pull up resistor, waiting for the falling edge
+#define LATCH_IDLE()	do { IN_LATCH_PORTx |= IN_LATCH_MASK; IN_LATCH_DDRx &= ~IN_LATCH_MASK; } while (0)
 
-static volatile uint8_t USI_TWI_Overflow_State = 0; // 0 means "have not been addressed"
+// private function prototypes
+static void
+	spi_handler(void),
+	i2c_handler(void),
+	uart_handler(void),
+	send_to_neopixel(void);
+static inputmode_t get_input_mode(void);
+
+static volatile USI_TWI_state_t USI_TWI_Overflow_State = USI_SLAVE_CHECK_ADDRESS; // 0 means "have not been addressed"
+static volatile inputmode_t input_mode;
 
 // defines for UART input mode
 #ifndef BAUDRATE
@@ -90,11 +118,6 @@ static volatile char is_rxing = 0;
 #define BUFFER_SIZE		((RAMEND - RAMSTART) - (32 * 3)) // if the buffer is too big then we might get a stack collision
 static volatile uint8_t* buffer;
 static volatile uint16_t buffer_idx = 0;
-static inputmode_t input_mode;
-
-// func prototype
-static void send_to_neopixel(void);
-static inputmode_t get_input_mode(void);
 
 int main(void)
 {
@@ -114,42 +137,42 @@ int main(void)
 	// default low
 	OUT_PORTx &= ~OUT_MASK;
 
-	uint8_t cur_latch, last_latch;
+	// For testing, call a handler directly:
+	//spi_handler();
+	//i2c_handler();
+	//uart_handler();
 
 	while (1)
 	{
 		input_mode = get_input_mode();
+		if (input_mode == INPUTMODE_SPI) {
+			spi_handler();
+		}
+		else if (input_mode == INPUTMODE_I2C) {
+			i2c_handler();
+		}
+		else if (input_mode == INPUTMODE_UART) {
+			uart_handler();
+		}
+	}
 
-		if (input_mode == INPUTMODE_SPI)
-		{
-			// USI setup for slave 
-			USICR = _BV(USIWM0) | _BV(USICS1); // 3 wire mode, positive edge triggered
-			USISR = _BV(USIOIF); // clears interrupt and resets counter
-		}
-		else if (input_mode == INPUTMODE_UART)
-		{
-			USICR  =  0;									// Disable USI, will be enabled by PCINT
-			GIFR   =  (1<<PCIF);							// Clear pin change interrupt flag
-			GIMSK |=  (1<<PCIE);							// Enable pin change interrupt
-			PCMSK |=  (1<<PCINT0);							// Use DI pin
-			sei();
-		}
-		else if (input_mode == INPUTMODE_I2C)
-		{
-			USICR =	(1<<USISIE)|(0<<USIOIE)|				// Enable Start Condition Interrupt. Disable Overflow Interrupt.
-					(1<<USIWM1)|(1<<USIWM0)|				// Set USI in Two-wire mode. No USI Counter overflow prior
-															// to first Start Condition (potentail failure)
-					(1<<USICS1)|(0<<USICS0)|(0<<USICLK)|	// Shift Register Clock Source = External, positive edge
-					(0<<USITC);
-			USISR = 0xF0;									// Clear all flags and reset overflow counter
-			IN_CLK_DDRx &= ~IN_CLK_MASK;
-			IN_DATA_DDRx &= ~IN_DATA_MASK;
-			sei();
-		}
+	// should never be able to reach here
+	return 0;
+}
 
-		// release the latch pin to indicate that it is no longer busy
-		IN_LATCH_DDRx  &= ~IN_LATCH_MASK;
-		IN_LATCH_PORTx |=  IN_LATCH_MASK; // activate internal pull-up resistor
+static void spi_handler(void)
+{
+	uint8_t cur_latch, last_latch;
+
+	input_mode = INPUTMODE_SPI;
+
+	while (1)
+	{
+		// USI setup for slave 
+		USICR = _BV(USIWM0) | _BV(USICS1); // 3 wire mode, positive edge triggered
+		USISR = _BV(USIOIF); // clears interrupt and resets counter
+
+		LATCH_IDLE();
 
 		// reset falling edge detection
 		last_latch = IN_LATCH_MASK;
@@ -157,16 +180,62 @@ int main(void)
 
 		while (1)
 		{
-			if ((input_mode != INPUTMODE_I2C && (last_latch & IN_LATCH_MASK) != 0 && (cur_latch & IN_LATCH_MASK) == 0) || (input_mode == INPUTMODE_I2C && bit_is_set(USISR, USIPF))) // falling edge or I2C stop condition
+			if ((last_latch & IN_LATCH_MASK) != 0 && (cur_latch & IN_LATCH_MASK) == 0) // falling edge
 			{
-				// drive the latch pin low to indicate that it is busy
-				IN_LATCH_PORTx &= ~IN_LATCH_MASK;
-				IN_LATCH_DDRx  |=  IN_LATCH_MASK;
+				LATCH_BUSY();
 
-				if (bit_is_set(USISR, USIPF)) {
-					// clear the stop condition flag if set
-					USISR |= _BV(USIPF);
+				if (buffer_idx > 0) // only if at least one byte is RX'ed
+				{
+					// shutdown the USI
+					USICR = 0;
+					USISR = 0;
+
+					send_to_neopixel();
+					_delay_us(25); // at 500 KHz, it is possible to send 3 bytes in under 50 us, a delay here is needed to ensure the NeoPixels latch
 				}
+
+				break; // exit out of the loop reset USI
+			}
+
+			if (bit_is_set(USISR, USIOIF)) // new data arrived
+			{
+				if (buffer_idx < BUFFER_SIZE) buffer[buffer_idx++] = USIDR; // take input w/o overflow
+				USISR |= _BV(USIOIF); // clear the flag
+			}
+
+			// falling edge detection
+			last_latch = cur_latch;
+			cur_latch = IN_LATCH_PINx;
+		}
+	}
+}
+
+static void uart_handler(void)
+{
+	uint8_t cur_latch, last_latch;
+
+	input_mode = INPUTMODE_UART;
+
+	while (1)
+	{
+		USICR  =  0;			// Disable USI, will be enabled by PCINT
+		GIFR   =  (1<<PCIF);	// Clear pin change interrupt flag
+		GIMSK |=  (1<<PCIE);	// Enable pin change interrupt
+		PCMSK |=  (1<<PCINT0);	// Use DI pin
+		is_rxing = 0;
+		sei();
+
+		LATCH_IDLE();
+
+		// reset falling edge detection
+		last_latch = IN_LATCH_MASK;
+		cur_latch = IN_LATCH_MASK;
+
+		while (1)
+		{
+			if ((last_latch & IN_LATCH_MASK) != 0 && (cur_latch & IN_LATCH_MASK) == 0) // falling edge
+			{
+				LATCH_BUSY();
 
 				if (buffer_idx > 0) // only if at least one byte is RX'ed
 				{
@@ -177,19 +246,79 @@ int main(void)
 					TCCR0B = 0;
 
 					send_to_neopixel();
-
-					buffer_idx = 0; // no more data
+					// no delay needed because there's no way to send 3 bytes of data in under 50 us (NeoPixel's latch timeout)
 				}
 
 				break; // exit out of the loop reset USI
 			}
-			else if (input_mode == INPUTMODE_SPI)
+
+			// falling edge detection
+			last_latch = cur_latch;
+			cur_latch = IN_LATCH_PINx;
+		}
+	}
+}
+
+static void i2c_handler(void)
+{
+	uint8_t cur_latch, last_latch;
+	char has_trigger;
+
+	input_mode = INPUTMODE_I2C;
+
+	LATCH_IDLE();
+
+	while (1)
+	{
+		USICR =	(1<<USISIE)|(0<<USIOIE)|				// Enable Start Condition Interrupt. Disable Overflow Interrupt.
+				(1<<USIWM1)|(1<<USIWM0)|				// Set USI in Two-wire mode. No USI Counter overflow prior
+														// to first Start Condition (potentail failure)
+				(1<<USICS1)|(0<<USICS0)|(0<<USICLK)|	// Shift Register Clock Source = External, positive edge
+				(0<<USITC);
+		USISR = 0xF0;									// Clear all flags and reset overflow counter
+		IN_CLK_DDRx &= ~IN_CLK_MASK;
+		IN_DATA_DDRx &= ~IN_DATA_MASK;
+		sei();
+
+		// reset rising edge detection
+		last_latch = 0;
+		cur_latch = 0;
+		has_trigger = 0;
+
+		while (1)
+		{
+			if (bit_is_set(USISR, USIPF)) {
+				is_rxing = 0;
+				// clear the stop condition flag if set
+				USISR |= _BV(USIPF);
+			}
+
+			if ((last_latch & IN_LATCH_MASK) == 0 && (cur_latch & IN_LATCH_MASK) != 0) // rising edge
 			{
-				if (bit_is_set(USISR, USIOIF)) // new data arrived
+				// or if the latch pin is disconnected, this if statement will also be triggered
+				has_trigger = 1;
+			}
+
+			if (has_trigger != 0 && is_rxing == 0)
+			{
+				has_trigger = 0;
+
+				if (buffer_idx > 0)
 				{
-					if (buffer_idx < BUFFER_SIZE) buffer[buffer_idx++] = USIDR; // take input w/o overflow
-					USIDR = 0; // make sure we don't accidentally send stuff to neopixel
-					USISR |= _BV(USIOIF); // clear the flag
+					// shutdown the USI
+					USICR = 0;
+					USISR = 0;
+
+					// occupy the bus to disallow incoming communication, indicate that it is busy
+					IN_DATA_PORTx &= ~IN_DATA_MASK;
+					IN_DATA_DDRx  |=  IN_DATA_MASK;
+					IN_CLK_DDRx   |=  IN_CLK_MASK;
+					IN_CLK_PORTx  &= ~IN_CLK_MASK;
+
+					send_to_neopixel();
+					// no delay needed because there's no way to send 3 bytes of data in under 50 us (NeoPixel's latch timeout)
+
+					break; // exit out of the loop reset USI
 				}
 			}
 
@@ -198,23 +327,28 @@ int main(void)
 			cur_latch = IN_LATCH_PINx;
 		}
 	}
-
-	return 0;
 }
 
 static void send_to_neopixel(void)
 {
 	cli(); // timing critical code below, no interrupts allowed
 
-	// code below is copied from Adafruit_NeoPixel.cpp, git hash a494d8992d18d10a3f4b90e92b966aaf1cb2272b
+	// code below is copied from Adafruit_NeoPixel.cpp
 
-	volatile uint16_t i = buffer_idx; // Loop counter
+	// Global variable buffer_idx is altered by this function.  It will
+	// always equal zero on return, indicating an empty buffer.
+
 	volatile uint8_t next, bit;
 	volatile uint8_t
 	*ptr	= &buffer[0],	// Pointer to next byte
 	b		= *ptr++,		// Current byte value
 	hi,						// PORT w/output bit set high
-	lo; 
+	lo;						// PORT w/output bit set low
+
+	volatile uint8_t* port = &OUT_PORTx;
+	hi = OUT_PORTx |  OUT_MASK;
+	lo = OUT_PORTx & ~OUT_MASK;
+
 	// Hand-tuned assembly code issues data to the LED drivers at a specific
 	// rate.  There's separate code for different CPU speeds (8, 12, 16 MHz)
 	// for both the WS2811 (400 KHz) and WS2812 (800 KHz) drivers.  The
@@ -250,8 +384,6 @@ static void send_to_neopixel(void)
 		// 10 instruction clocks per bit: HHxxxxxLLL
 		// OUT instructions:              ^ ^    ^   (T=0,2,7)
 
-		hi = OUT_PORTx |  OUT_MASK;
-		lo = OUT_PORTx & ~OUT_MASK;
 		n1 = lo;
 		if(b & 0x80) n1 = hi;
 
@@ -262,88 +394,88 @@ static void send_to_neopixel(void)
 		// relative branch.
 
 		asm volatile(
-			"headD:\n\t"        // Clk  Pseudocode
-			// Bit 7:
-			"out  %0, %1\n\t"   // 1    PORT = hi
-			"mov  %3, %4\n\t"   // 1    n2   = lo
-			"out  %0, %2\n\t"   // 1    PORT = n1
-			"rjmp .+0\n\t"      // 2    nop nop
-			"sbrc %5, 6\n\t"    // 1-2  if(b & 0x40)
-			"mov  %3, %1\n\t"   // 0-1    n2 = hi
-			"out  %0, %4\n\t"   // 1    PORT = lo
-			"rjmp .+0\n\t"      // 2    nop nop
-			// Bit 6:
-			"out  %0, %1\n\t"   // 1    PORT = hi
-			"mov  %2, %4\n\t"   // 1    n1   = lo
-			"out  %0, %3\n\t"   // 1    PORT = n2
-			"rjmp .+0\n\t"      // 2    nop nop
-			"sbrc %5, 5\n\t"    // 1-2  if(b & 0x20)
-			"mov  %2, %1\n\t"   // 0-1    n1 = hi
-			"out  %0, %4\n\t"   // 1    PORT = lo
-			"rjmp .+0\n\t"      // 2    nop nop
-			// Bit 5:
-			"out  %0, %1\n\t"   // 1    PORT = hi
-			"mov  %3, %4\n\t"   // 1    n2   = lo
-			"out  %0, %2\n\t"   // 1    PORT = n1
-			"rjmp .+0\n\t"      // 2    nop nop
-			"sbrc %5, 4\n\t"    // 1-2  if(b & 0x10)
-			"mov  %3, %1\n\t"   // 0-1    n2 = hi
-			"out  %0, %4\n\t"   // 1    PORT = lo
-			"rjmp .+0\n\t"      // 2    nop nop
-			// Bit 4:
-			"out  %0, %1\n\t"   // 1    PORT = hi
-			"mov  %2, %4\n\t"   // 1    n1   = lo
-			"out  %0, %3\n\t"   // 1    PORT = n2
-			"rjmp .+0\n\t"      // 2    nop nop
-			"sbrc %5, 3\n\t"    // 1-2  if(b & 0x08)
-			"mov  %2, %1\n\t"   // 0-1    n1 = hi
-			"out  %0, %4\n\t"   // 1    PORT = lo
-			"rjmp .+0\n\t"      // 2    nop nop
-			// Bit 3:
-			"out  %0, %1\n\t"   // 1    PORT = hi
-			"mov  %3, %4\n\t"   // 1    n2   = lo
-			"out  %0, %2\n\t"   // 1    PORT = n1
-			"rjmp .+0\n\t"      // 2    nop nop
-			"sbrc %5, 2\n\t"    // 1-2  if(b & 0x04)
-			"mov  %3, %1\n\t"   // 0-1    n2 = hi
-			"out  %0, %4\n\t"   // 1    PORT = lo
-			"rjmp .+0\n\t"      // 2    nop nop
-			// Bit 2:
-			"out  %0, %1\n\t"   // 1    PORT = hi
-			"mov  %2, %4\n\t"   // 1    n1   = lo
-			"out  %0, %3\n\t"   // 1    PORT = n2
-			"rjmp .+0\n\t"      // 2    nop nop
-			"sbrc %5, 1\n\t"    // 1-2  if(b & 0x02)
-			"mov  %2, %1\n\t"   // 0-1    n1 = hi
-			"out  %0, %4\n\t"   // 1    PORT = lo
-			"rjmp .+0\n\t"      // 2    nop nop
-			// Bit 1:
-			"out  %0, %1\n\t"   // 1    PORT = hi
-			"mov  %3, %4\n\t"   // 1    n2   = lo
-			"out  %0, %2\n\t"   // 1    PORT = n1
-			"rjmp .+0\n\t"      // 2    nop nop
-			"sbrc %5, 0\n\t"    // 1-2  if(b & 0x01)
-			"mov  %3, %1\n\t"   // 0-1    n2 = hi
-			"out  %0, %4\n\t"   // 1    PORT = lo
-			"sbiw %6, 1\n\t"    // 2    i--  (dec. but don't act on zero flag yet)
-			// Bit 0:
-			"out  %0, %1\n\t"   // 1    PORT = hi
-			"mov  %2, %4\n\t"   // 1    n1   = lo
-			"out  %0, %3\n\t"   // 1    PORT = n2
-			"ld   %5, %a7+\n\t" // 2    b = *ptr++
-			"sbrc %5, 7\n\t"    // 1-2  if(b & 0x80)
-			"mov  %2, %1\n\t"   // 0-1    n1 = hi
-			"out  %0, %4\n\t"   // 1    PORT = lo
-			"brne headD\n"      // 2    while(i) (zero flag determined above)
-		::
-			"I" (_SFR_IO_ADDR(OUT_PORTx)), // %0
-			"r" (hi),                      // %1
-			"r" (n1),                      // %2
-			"r" (n2),                      // %3
-			"r" (lo),                      // %4
-			"r" (b),                       // %5
-			"w" (i),                       // %6
-			"e" (ptr)                      // %a7
+			"headB:"                  "\n\t"	// Clk  Pseudocode
+			"out  %[port] , %[hi]"    "\n\t"	// 1    PORT = hi
+			"mov  %[n2]   , %[lo]"    "\n\t"	// 1    n2   = lo
+			"out  %[port] , %[n1]"    "\n\t"	// 1    PORT = n1
+			"rjmp .+0"                "\n\t"	// 2    nop nop
+			"sbrc %[byte] , 6"        "\n\t"	// 1-2  if(b & 0x40)
+			"mov %[n2]   , %[hi]"     "\n\t"	// 0-1    n2 = hi
+			"out  %[port] , %[lo]"    "\n\t"	// 1    PORT = lo
+			"rjmp .+0"                "\n\t"	// 2    nop nop
+
+			"out  %[port] , %[hi]"    "\n\t"	// 1    PORT = hi
+			"mov  %[n1]   , %[lo]"    "\n\t"	// 1    n1   = lo
+			"out  %[port] , %[n2]"    "\n\t"	// 1    PORT = n2
+			"rjmp .+0"                "\n\t"	// 2    nop nop
+			"sbrc %[byte] , 5"        "\n\t"	// 1-2  if(b & 0x20)
+			"mov %[n1]   , %[hi]"     "\n\t"	// 0-1    n1 = hi
+			"out  %[port] , %[lo]"    "\n\t"	// 1    PORT = lo
+			"rjmp .+0"                "\n\t"	// 2    nop nop
+
+			"out  %[port] , %[hi]"    "\n\t"	// 1    PORT = hi
+			"mov  %[n2]   , %[lo]"    "\n\t"	// 1    n2   = lo
+			"out  %[port] , %[n1]"    "\n\t"	// 1    PORT = n1
+			"rjmp .+0"                "\n\t"	// 2    nop nop
+			"sbrc %[byte] , 4"        "\n\t"	// 1-2  if(b & 0x10)
+			"mov %[n2]   , %[hi]"     "\n\t"	// 0-1    n2 = hi
+			"out  %[port] , %[lo]"    "\n\t"	// 1    PORT = lo
+			"rjmp .+0"                "\n\t"	// 2    nop nop
+
+			"out  %[port] , %[hi]"    "\n\t"	// 1    PORT = hi
+			"mov  %[n1]   , %[lo]"    "\n\t"	// 1    n1   = lo
+			"out  %[port] , %[n2]"    "\n\t"	// 1    PORT = n2
+			"rjmp .+0"                "\n\t"	// 2    nop nop
+			"sbrc %[byte] , 3"        "\n\t"	// 1-2  if(b & 0x08)
+			"mov %[n1]   , %[hi]"     "\n\t"	// 0-1    n1 = hi
+			"out  %[port] , %[lo]"    "\n\t"	// 1    PORT = lo
+			"rjmp .+0"                "\n\t"	// 2    nop nop
+
+			"out  %[port] , %[hi]"    "\n\t"	// 1    PORT = hi
+			"mov  %[n2]   , %[lo]"    "\n\t"	// 1    n2   = lo
+			"out  %[port] , %[n1]"    "\n\t"	// 1    PORT = n1
+			"rjmp .+0"                "\n\t"	// 2    nop nop
+			"sbrc %[byte] , 2"        "\n\t"	// 1-2  if(b & 0x04)
+			"mov %[n2]   , %[hi]"     "\n\t"	// 0-1    n2 = hi
+			"out  %[port] , %[lo]"    "\n\t"	// 1    PORT = lo
+			"rjmp .+0"                "\n\t"	// 2    nop nop
+
+			"out  %[port] , %[hi]"    "\n\t"	// 1    PORT = hi
+			"mov  %[n1]   , %[lo]"    "\n\t"	// 1    n1   = lo
+			"out  %[port] , %[n2]"    "\n\t"	// 1    PORT = n2
+			"rjmp .+0"                "\n\t"	// 2    nop nop
+			"sbrc %[byte] , 1"        "\n\t"	// 1-2  if(b & 0x02)
+			"mov %[n1]   , %[hi]"     "\n\t"	// 0-1    n1 = hi
+			"out  %[port] , %[lo]"    "\n\t"	// 1    PORT = lo
+			"rjmp .+0"                "\n\t"	// 2    nop nop
+
+			"out  %[port] , %[hi]"    "\n\t"	// 1    PORT = hi
+			"mov  %[n2]   , %[lo]"    "\n\t"	// 1    n2   = lo
+			"out  %[port] , %[n1]"    "\n\t"	// 1    PORT = n1
+			"rjmp .+0"                "\n\t"	// 2    nop nop
+			"sbrc %[byte] , 0"        "\n\t"	// 1-2  if(b & 0x01)
+			"mov %[n2]   , %[hi]"     "\n\t"	// 0-1    n2 = hi
+			"out  %[port] , %[lo]"    "\n\t"	// 1    PORT = lo
+			"sbiw %[count], 1"        "\n\t"	// 2    i--  (dec. but don't act on zero flag yet)
+
+			"out  %[port] , %[hi]"    "\n\t"	// 1    PORT = hi
+			"mov  %[n1]   , %[lo]"    "\n\t"	// 1    n1   = lo
+			"out  %[port] , %[n2]"    "\n\t"	// 1    PORT = n2
+			"ld   %[byte] , %a[ptr]+" "\n\t"	// 2    b = *ptr++
+			"sbrc %[byte] , 7"        "\n\t"	// 1-2  if(b & 0x80)
+			"mov %[n1]   , %[hi]"     "\n\t"	// 0-1    n1 = hi
+			"out  %[port] , %[lo]"    "\n\t"	// 1    PORT = lo
+			"brne headB"              "\n"		// 2    while(i) (zero flag determined above)         
+			:
+			[count] "+w" (buffer_idx),
+			[n1]    "+r" (n1),
+			[n2]    "+r" (n2),
+			[byte]  "+r" (b)
+			:
+			[ptr]    "e" (ptr),
+			[port]   "I" (_SFR_IO_ADDR(OUT_PORTx)),
+			[hi]     "r" (hi),
+			[lo]     "r" (lo)
 		); // end asm
 	}
 	else
@@ -359,18 +491,14 @@ static void send_to_neopixel(void)
 		// 20 inst. clocks per bit: HHHHxxxxxxLLLLLLLLLL
 		// ST instructions:         ^   ^     ^          (T=0,4,10)
 
-		volatile uint8_t next, bit;
-		volatile uint8_t* port = &OUT_PORTx;
-		hi   = OUT_PORTx |  OUT_MASK;
-		lo   = OUT_PORTx & ~OUT_MASK;
 		next = lo;
 		bit  = 8;
 
 		asm volatile(
-			"head20:\n\t"          // Clk  Pseudocode    (T =  0)
+			"head20:\n\t"         // Clk  Pseudocode    (T =  0)
 			"st   %a0, %1\n\t"    // 2    PORT = hi     (T =  2)
 			"sbrc %2, 7\n\t"      // 1-2  if(b & 128)
-			"mov  %4, %1\n\t"    // 0-1   next = hi    (T =  4)
+			"mov  %4, %1\n\t"     // 0-1   next = hi    (T =  4)
 			"st   %a0, %4\n\t"    // 2    PORT = next   (T =  6)
 			"mov  %4, %5\n\t"     // 1    next = lo     (T =  7)
 			"dec  %3\n\t"         // 1    bit--         (T =  8)
@@ -381,7 +509,7 @@ static void send_to_neopixel(void)
 			"rjmp .+0\n\t"        // 2    nop nop       (T = 16)
 			"rjmp .+0\n\t"        // 2    nop nop       (T = 18)
 			"rjmp head20\n\t"     // 2    -> head20 (next bit out)
-			"nextbyte20:\n\t"      //                    (T = 10)
+			"nextbyte20:\n\t"     //                    (T = 10)
 			"st   %a0, %5\n\t"    // 2    PORT = lo     (T = 12)
 			"nop\n\t"             // 1    nop           (T = 13)
 			"ldi  %3, 8\n\t"      // 1    bit = 8       (T = 14)
@@ -396,7 +524,7 @@ static void send_to_neopixel(void)
 			"r" (next),          // %4
 			"r" (lo),            // %5
 			"e" (ptr),           // %a6
-			"w" (i)              // %7
+			"w" (buffer_idx)     // %7
 		); // end asm
 	}
 // 12 MHz(ish) AVR --------------------------------------------------------
@@ -411,61 +539,59 @@ static void send_to_neopixel(void)
 		// 15 instruction clocks per bit: HHHHxxxxxxLLLLL
 		// OUT instructions:              ^   ^     ^     (T=0,4,10)
 
-		volatile uint8_t next;
-		hi   = OUT_PORTx |  OUT_MASK;
-		lo   = OUT_PORTx & ~OUT_MASK;
 		next = lo;
-		if(b & 0x80) next = hi;
+		if (b & 0x80) next = hi;
 
 		// Don't "optimize" the OUT calls into the bitTime subroutine;
 		// we're exploiting the RCALL and RET as 3- and 4-cycle NOPs!
 		asm volatile(
-			"headD:\n\t"          //        (T =  0)
-			"out   %0, %1\n\t"   //        (T =  1)
-			"rcall bitTimeD\n\t" // Bit 7  (T = 15)
-			"out   %0, %1\n\t"
-			"rcall bitTimeD\n\t" // Bit 6
-			"out   %0, %1\n\t"
-			"rcall bitTimeD\n\t" // Bit 5
-			"out   %0, %1\n\t"
-			"rcall bitTimeD\n\t" // Bit 4
-			"out   %0, %1\n\t"
-			"rcall bitTimeD\n\t" // Bit 3
-			"out   %0, %1\n\t"
-			"rcall bitTimeD\n\t" // Bit 2
-			"out   %0, %1\n\t"
-			"rcall bitTimeD\n\t" // Bit 1
-			// Bit 0:
-			"out  %0, %1\n\t"    // 1    PORT = hi    (T =  1)
-			"rjmp .+0\n\t"       // 2    nop nop      (T =  3)
-			"ld   %4, %a5+\n\t"  // 2    b = *ptr++   (T =  5)
-			"out  %0, %2\n\t"    // 1    PORT = next  (T =  6)
-			"mov  %2, %3\n\t"    // 1    next = lo    (T =  7)
-			"sbrc %4, 7\n\t"     // 1-2  if(b & 0x80) (T =  8)
-			"mov %2, %1\n\t"    // 0-1    next = hi  (T =  9)
-			"nop\n\t"            // 1                 (T = 10)
-			"out  %0, %3\n\t"    // 1    PORT = lo    (T = 11)
-			"sbiw %6, 1\n\t"     // 2    i--          (T = 13)
-			"brne headD\n\t"     // 2    if(i != 0) -> headD (next byte)
-			"rjmp doneD\n\t"
-			"bitTimeD:\n\t"      //      nop nop nop     (T =  4)
-			"out  %0, %2\n\t"   // 1    PORT = next     (T =  5)
-			"mov  %2, %3\n\t"   // 1    next = lo       (T =  6)
-			"rol  %4\n\t"       // 1    b <<= 1         (T =  7)
-			"sbrc %4, 7\n\t"    // 1-2  if(b & 0x80)    (T =  8)
-			"mov %2, %1\n\t"   // 0-1   next = hi      (T =  9)
-			"nop\n\t"           // 1                    (T = 10)
-			"out  %0, %3\n\t"   // 1    PORT = lo       (T = 11)
-			"ret\n\t"           // 4    nop nop nop nop (T = 15)
-			"doneD:\n\t"
-		::
-			"I" (_SFR_IO_ADDR(OUT_PORTx)), // %0
-			"r" (hi),                  // %1
-			"r" (next),                // %2
-			"r" (lo),                  // %3
-			"r" (b),                   // %4
-			"e" (ptr),                 // %a5
-			"w" (i)                    // %6
+			"headB:"                   "\n\t"	//        (T =  0)
+			"out   %[port], %[hi]"     "\n\t"	//        (T =  1)
+			"rcall bitTimeB"           "\n\t"	// Bit 7  (T = 15)
+			"out   %[port], %[hi]"     "\n\t"	
+			"rcall bitTimeB"           "\n\t"	// Bit 6
+			"out   %[port], %[hi]"     "\n\t"	
+			"rcall bitTimeB"           "\n\t"	// Bit 5
+			"out   %[port], %[hi]"     "\n\t"	
+			"rcall bitTimeB"           "\n\t"	// Bit 4
+			"out   %[port], %[hi]"     "\n\t"	
+			"rcall bitTimeB"           "\n\t"	// Bit 3
+			"out   %[port], %[hi]"     "\n\t"	
+			"rcall bitTimeB"           "\n\t"	// Bit 2
+			"out   %[port], %[hi]"     "\n\t"	
+			"rcall bitTimeB"           "\n\t"	// Bit 1
+												// Bit 0:
+			"out   %[port] , %[hi]"    "\n\t"	// 1    PORT = hi    (T =  1)
+			"rjmp  .+0"                "\n\t"	// 2    nop nop      (T =  3)
+			"ld    %[byte] , %a[ptr]+" "\n\t"	// 2    b = *ptr++   (T =  5)
+			"out   %[port] , %[next]"  "\n\t"	// 1    PORT = next  (T =  6)
+			"mov   %[next] , %[lo]"    "\n\t"	// 1    next = lo    (T =  7)
+			"sbrc  %[byte] , 7"        "\n\t"	// 1-2  if(b & 0x80) (T =  8)
+			"mov   %[next] , %[hi]"    "\n\t"	// 0-1    next = hi  (T =  9)
+			"nop"                      "\n\t"	// 1                 (T = 10)
+			"out   %[port] , %[lo]"    "\n\t"	// 1    PORT = lo    (T = 11)
+			"sbiw  %[count], 1"        "\n\t"	// 2    i--          (T = 13)
+			"brne  headB"              "\n\t"	// 2    if(i != 0) -> headD (next byte)
+			"rjmp doneB"               "\n\t"	
+			"bitTimeB:"                "\n\t"	//      nop nop nop     (T =  4)
+			"out   %[port] , %[next]"  "\n\t"	// 1    PORT = next     (T =  5)
+			"mov   %[next] , %[lo]"    "\n\t"	// 1    next = lo       (T =  6)
+			"rol   %[byte]"            "\n\t"	// 1    b <<= 1         (T =  7)
+			"sbrc  %[byte] , 7"        "\n\t"	// 1-2  if(b & 0x80)    (T =  8)
+			"mov   %[next] , %[hi]"    "\n\t"	// 0-1   next = hi      (T =  9)
+			"nop"                      "\n\t"	// 1                    (T = 10)
+			"out   %[port] , %[lo]"    "\n\t"	// 1    PORT = lo       (T = 11)
+			"ret"                      "\n\t"	// 4    nop nop nop nop (T = 15)            
+			"doneB:"                   "\n"
+			:
+			[count] "+w" (buffer_idx),
+			[next]  "+r" (next),
+			[byte]  "+r" (b)
+			:
+			[ptr]    "e" (ptr),
+			[port]   "I" (_SFR_IO_ADDR(OUT_PORTx)),
+			[hi]     "r" (hi),
+			[lo]     "r" (lo)
 		); // end asm
 	}
 	else
@@ -474,18 +600,14 @@ static void send_to_neopixel(void)
 		// 30 instruction clocks per bit: HHHHHHxxxxxxxxxLLLLLLLLLLLLLLL
 		// ST instructions:               ^     ^        ^    (T=0,6,15)
 
-		volatile uint8_t next, bit;
-		volatile uint8_t* port = &OUT_PORTx;
-		hi   = OUT_PORTx |  OUT_MASK;
-		lo   = OUT_PORTx & ~OUT_MASK;
 		next = lo;
 		bit  = 8;
 
 		asm volatile(
-			"head30:\n\t"          // Clk  Pseudocode    (T =  0)
+			"head30:\n\t"         // Clk  Pseudocode    (T =  0)
 			"st   %a0, %1\n\t"    // 2    PORT = hi     (T =  2)
 			"sbrc %2, 7\n\t"      // 1-2  if(b & 128)
-			"mov  %4, %1\n\t"    // 0-1   next = hi    (T =  4)
+			"mov  %4, %1\n\t"     // 0-1   next = hi    (T =  4)
 			"rjmp .+0\n\t"        // 2    nop nop       (T =  6)
 			"st   %a0, %4\n\t"    // 2    PORT = next   (T =  8)
 			"rjmp .+0\n\t"        // 2    nop nop       (T = 10)
@@ -501,7 +623,7 @@ static void send_to_neopixel(void)
 			"rjmp .+0\n\t"        // 2    nop nop       (T = 26)
 			"rjmp .+0\n\t"        // 2    nop nop       (T = 28)
 			"rjmp head30\n\t"     // 2    -> head30 (next bit out)
-			"nextbyte30:\n\t"      //                    (T = 22)
+			"nextbyte30:\n\t"     //                    (T = 22)
 			"nop\n\t"             // 1    nop           (T = 23)
 			"ldi  %3, 8\n\t"      // 1    bit = 8       (T = 24)
 			"ld   %2, %a6+\n\t"   // 2    b = *ptr++    (T = 26)
@@ -515,7 +637,7 @@ static void send_to_neopixel(void)
 			"r" (next),          // %4
 			"r" (lo),            // %5
 			"e" (ptr),           // %a6
-			"w" (i)              // %7
+			"w" (buffer_idx)     // %7
 		); // end asm
 	}
 // 16 MHz(ish) AVR --------------------------------------------------------
@@ -530,45 +652,42 @@ static void send_to_neopixel(void)
 		// 20 inst. clocks per bit: HHHHHxxxxxxxxLLLLLLL
 		// ST instructions:         ^   ^        ^       (T=0,5,13)
 
-		volatile uint8_t next, bit;
-		volatile uint8_t* port = &OUT_PORTx;
-		hi   = OUT_PORTx |  OUT_MASK;
-		lo   = OUT_PORTx & ~OUT_MASK;
 		next = lo;
 		bit  = 8;
 
 		asm volatile(
-			"head20:\n\t"          // Clk  Pseudocode    (T =  0)
-			"st   %a0, %1\n\t"    // 2    PORT = hi     (T =  2)
-			"sbrc %2, 7\n\t"      // 1-2  if(b & 128)
-			"mov  %4, %1\n\t"    // 0-1   next = hi    (T =  4)
-			"dec  %3\n\t"         // 1    bit--         (T =  5)
-			"st   %a0, %4\n\t"    // 2    PORT = next   (T =  7) ST and MOV don't
-			"mov  %4, %5\n\t"     // 1    next = lo     (T =  8) change Z flag,
-			"breq nextbyte20\n\t" // 1-2  if(bit == 0)       <-- so this is OK.
-			"rol  %2\n\t"         // 1    b <<= 1       (T = 10)
-			"rjmp .+0\n\t"        // 2    nop nop       (T = 12)
-			"nop\n\t"             // 1    nop           (T = 13)
-			"st   %a0, %5\n\t"    // 2    PORT = lo     (T = 15)
-			"nop\n\t"             // 1    nop           (T = 16)
-			"rjmp .+0\n\t"        // 2    nop nop       (T = 18)
-			"rjmp head20\n\t"     // 2    -> head20 (next bit out)
-			"nextbyte20:\n\t"      //                    (T = 10)
-			"ldi  %3, 8\n\t"      // 1    bit = 8       (T = 11)
-			"ld   %2, %a6+\n\t"   // 2    b = *ptr++    (T = 13)
-			"st   %a0, %5\n\t"    // 2    PORT = lo     (T = 15)
-			"nop\n\t"             // 1    nop           (T = 16)
-			"sbiw %7, 1\n\t"      // 2    i--           (T = 18)
-			"brne head20\n\t"     // 2    if(i != 0) -> head20 (next byte)
-		::
-			"e" (port),          // %a0
-			"r" (hi),            // %1
-			"r" (b),             // %2
-			"r" (bit),           // %3
-			"r" (next),          // %4
-			"r" (lo),            // %5
-			"e" (ptr),           // %a6
-			"w" (i)              // %7
+			"head20:"                 "\n\t"	// Clk  Pseudocode    (T =  0)
+			"out  %[port],  %[hi]"    "\n\t"	// 2    PORT = hi     (T =  2)
+			"sbrc %[byte],  7"        "\n\t"	// 1-2  if(b & 128)
+			"mov  %[next], %[hi]"     "\n\t"	// 0-1   next = hi    (T =  4)
+			"dec  %[bit]"             "\n\t"	// 1    bit--         (T =  5)
+			"out  %[port],  %[next]"  "\n\t"	// 2    PORT = next   (T =  7) ST and MOV don't
+			"mov  %[next],  %[lo]"    "\n\t"	// 1    next = lo     (T =  8) change Z flag,
+			"breq nextbyte20"         "\n\t"	// 1-2  if(bit == 0)       <-- so this is OK.
+			"rol  %[byte]"            "\n\t"	// 1    b <<= 1       (T = 10)
+			"rjmp .+0"                "\n\t"	// 2    nop nop       (T = 12)
+			"nop"                     "\n\t"	// 1    nop           (T = 13)
+			"out  %[port],  %[lo]"    "\n\t"	// 2    PORT = lo     (T = 15)
+			"nop"                     "\n\t"	// 1    nop           (T = 16)
+			"rjmp .+0"                "\n\t"	// 2    nop nop       (T = 18)
+			"rjmp head20"             "\n\t"	// 2    -> head20 (next bit out)
+			"nextbyte20:"             "\n\t"	//                    (T = 10)
+			"ldi  %[bit] ,  8"        "\n\t"	// 1    bit = 8       (T = 11)
+			"ld   %[byte],  %a[ptr]+" "\n\t"	// 2    b = *ptr++    (T = 13)
+			"out  %[port],  %[lo]"    "\n\t"	// 2    PORT = lo     (T = 15)
+			"nop"                     "\n\t"	// 1    nop           (T = 16)
+			"sbiw %[count], 1"        "\n\t"	// 2    i--           (T = 18)
+			"brne head20"             "\n"		// 2    if(i != 0) -> head20 (next byte)           
+			:
+			[count] "+w" (buffer_idx),
+			[next]  "+r" (next),
+			[byte]  "+r" (b),
+			[bit]   "+r" (bit)
+			:
+			[ptr]    "e" (ptr),
+			[port]   "I" (_SFR_IO_ADDR(OUT_PORTx)),
+			[hi]     "r" (hi),
+			[lo]     "r" (lo)
 		); // end asm
 
 	}
@@ -580,18 +699,14 @@ static void send_to_neopixel(void)
 		// 40 inst. clocks per bit: HHHHHHHHxxxxxxxxxxxxLLLLLLLLLLLLLLLLLLLL
 		// ST instructions:         ^       ^           ^         (T=0,8,20)
 
-		volatile uint8_t next, bit;
-		volatile uint8_t* port = &OUT_PORTx;
-		hi   = OUT_PORTx |  OUT_MASK;
-		lo   = OUT_PORTx & ~OUT_MASK;
 		next = lo;
 		bit  = 8;
 
 		asm volatile(
-			"head40:\n\t"          // Clk  Pseudocode    (T =  0)
+			"head40:\n\t"         // Clk  Pseudocode    (T =  0)
 			"st   %a0, %1\n\t"    // 2    PORT = hi     (T =  2)
 			"sbrc %2, 7\n\t"      // 1-2  if(b & 128)
-			"mov  %4, %1\n\t"    // 0-1   next = hi    (T =  4)
+			"mov  %4, %1\n\t"     // 0-1   next = hi    (T =  4)
 			"rjmp .+0\n\t"        // 2    nop nop       (T =  6)
 			"rjmp .+0\n\t"        // 2    nop nop       (T =  8)
 			"st   %a0, %4\n\t"    // 2    PORT = next   (T = 10)
@@ -613,7 +728,7 @@ static void send_to_neopixel(void)
 			"rjmp .+0\n\t"        // 2    nop nop       (T = 36)
 			"rjmp .+0\n\t"        // 2    nop nop       (T = 38)
 			"rjmp head40\n\t"     // 2    -> head40 (next bit out)
-			"nextbyte40:\n\t"      //                    (T = 27)
+			"nextbyte40:\n\t"     //                    (T = 27)
 			"ldi  %3, 8\n\t"      // 1    bit = 8       (T = 28)
 			"ld   %2, %a6+\n\t"   // 2    b = *ptr++    (T = 30)
 			"rjmp .+0\n\t"        // 2    nop nop       (T = 32)
@@ -629,7 +744,7 @@ static void send_to_neopixel(void)
 			"r" (next),          // %4
 			"r" (lo),            // %5
 			"e" (ptr),           // %a6
-			"w" (i)              // %7
+			"w" (buffer_idx)     // %7
 		); // end asm
 	}
 #else
@@ -804,6 +919,7 @@ ISR (
 				(0<<USITC);
 	USISR =		(1<<USISIF)|(1<<USIOIF)|(1<<USIPF)|(1<<USIDC)|				// Clear flags
 				(0x0<<USICNT0);
+	is_rxing = 1;
 
 	asm volatile ("\n\t"
 		"pop r31\n\t" "pop r30\n\t" "pop r29\n\t" "pop r28\n\t" "pop r27\n\t"
@@ -827,6 +943,8 @@ ISR (
 void usi_ovf_vect_i2c()
 {
 	unsigned char tmpUSIDR;
+
+	is_rxing = 1;
 
 	switch (USI_TWI_Overflow_State)
 	{
