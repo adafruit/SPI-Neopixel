@@ -1,6 +1,6 @@
 PROJECT = spineopixel
 MCU = attiny85
-F_CPU = 8000000
+F_CPU = 16000000
 BURNMCU = attiny85
 BURNPROGRAMMER = usbtiny
 TARGET = ./$(PROJECT).elf
@@ -79,7 +79,7 @@ burn:
 	avrdude -p $(BURNMCU) -c $(BURNPROGRAMMER)  -U flash:w:./$(PROJECT).hex:a 
 
 burnfuses:
-	avrdude -p $(BURNMCU) -c $(BURNPROGRAMMER)  -U lfuse:w:0xE2:m -U hfuse:w:0xD7:m
+	avrdude -p $(BURNMCU) -c $(BURNPROGRAMMER)  -U lfuse:w:0xF1:m -U hfuse:w:0xD7:m
 
 ## Clean target
 .PHONY: clean

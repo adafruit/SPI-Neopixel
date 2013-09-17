@@ -652,42 +652,44 @@ static void send_to_neopixel(void)
 		// 20 inst. clocks per bit: HHHHHxxxxxxxxLLLLLLL
 		// ST instructions:         ^   ^        ^       (T=0,5,13)
 
+		volatile uint8_t next, bit;
+
 		next = lo;
 		bit  = 8;
 
 		asm volatile(
-			"head20:"                 "\n\t"	// Clk  Pseudocode    (T =  0)
-			"out  %[port],  %[hi]"    "\n\t"	// 2    PORT = hi     (T =  2)
-			"sbrc %[byte],  7"        "\n\t"	// 1-2  if(b & 128)
-			"mov  %[next], %[hi]"     "\n\t"	// 0-1   next = hi    (T =  4)
-			"dec  %[bit]"             "\n\t"	// 1    bit--         (T =  5)
-			"out  %[port],  %[next]"  "\n\t"	// 2    PORT = next   (T =  7) ST and MOV don't
-			"mov  %[next],  %[lo]"    "\n\t"	// 1    next = lo     (T =  8) change Z flag,
-			"breq nextbyte20"         "\n\t"	// 1-2  if(bit == 0)       <-- so this is OK.
-			"rol  %[byte]"            "\n\t"	// 1    b <<= 1       (T = 10)
-			"rjmp .+0"                "\n\t"	// 2    nop nop       (T = 12)
-			"nop"                     "\n\t"	// 1    nop           (T = 13)
-			"out  %[port],  %[lo]"    "\n\t"	// 2    PORT = lo     (T = 15)
-			"nop"                     "\n\t"	// 1    nop           (T = 16)
-			"rjmp .+0"                "\n\t"	// 2    nop nop       (T = 18)
-			"rjmp head20"             "\n\t"	// 2    -> head20 (next bit out)
-			"nextbyte20:"             "\n\t"	//                    (T = 10)
-			"ldi  %[bit] ,  8"        "\n\t"	// 1    bit = 8       (T = 11)
-			"ld   %[byte],  %a[ptr]+" "\n\t"	// 2    b = *ptr++    (T = 13)
-			"out  %[port],  %[lo]"    "\n\t"	// 2    PORT = lo     (T = 15)
-			"nop"                     "\n\t"	// 1    nop           (T = 16)
-			"sbiw %[count], 1"        "\n\t"	// 2    i--           (T = 18)
-			"brne head20"             "\n"		// 2    if(i != 0) -> head20 (next byte)           
+			"head20:"                      "\n\t" // Clk  Pseudocode    (T =  0)
+				"st   %a[port],  %[hi]"    "\n\t" // 2    PORT = hi     (T =  2)
+				"sbrc %[byte],  7"         "\n\t" // 1-2  if(b & 128)
+				"mov  %[next], %[hi]"      "\n\t" // 0-1   next = hi    (T =  4)
+				"dec  %[bit]"              "\n\t" // 1    bit--         (T =  5)
+				"st   %a[port],  %[next]"  "\n\t" // 2    PORT = next   (T =  7)
+				"mov  %[next] ,  %[lo]"    "\n\t" // 1    next = lo     (T =  8)
+				"breq nextbyte20"          "\n\t" // 1-2  if(bit == 0) (from dec above)
+				"rol  %[byte]"             "\n\t" // 1    b <<= 1       (T = 10)
+				"rjmp .+0"                 "\n\t" // 2    nop nop       (T = 12)
+				"nop"                      "\n\t" // 1    nop           (T = 13)
+				"st   %a[port],  %[lo]"    "\n\t" // 2    PORT = lo     (T = 15)
+				"nop"                      "\n\t" // 1    nop           (T = 16)
+				"rjmp .+0"                 "\n\t" // 2    nop nop       (T = 18)
+				"rjmp head20"              "\n\t" // 2    -> head20 (next bit out)
+			"nextbyte20:"                  "\n\t" //                    (T = 10)
+				"ldi  %[bit]  ,  8"        "\n\t" // 1    bit = 8       (T = 11)
+				"ld   %[byte] ,  %a[ptr]+" "\n\t" // 2    b = *ptr++    (T = 13)
+				"st   %a[port], %[lo]"     "\n\t" // 2    PORT = lo     (T = 15)
+				"nop"                      "\n\t" // 1    nop           (T = 16)
+				"sbiw %[count], 1"         "\n\t" // 2    i--           (T = 18)
+				"brne head20"              "\n"   // 2    if(i != 0) -> (next byte)
 			:
-			[count] "+w" (buffer_idx),
-			[next]  "+r" (next),
-			[byte]  "+r" (b),
-			[bit]   "+r" (bit)
+				[port]  "+e" (port),
+				[byte]  "+r" (b),
+				[bit]   "+r" (bit),
+				[next]  "+r" (next),
+				[count] "+w" (buffer_idx)
 			:
-			[ptr]    "e" (ptr),
-			[port]   "I" (_SFR_IO_ADDR(OUT_PORTx)),
-			[hi]     "r" (hi),
-			[lo]     "r" (lo)
+				[ptr]    "e" (ptr),
+				[hi]     "r" (hi),
+				[lo]     "r" (lo)
 		); // end asm
 
 	}
